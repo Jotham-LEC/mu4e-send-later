@@ -1,7 +1,8 @@
 EMACS ?= emacs
 # Test-only dependencies (org-msg), installed by `make deps'.
 DEPS = $(CURDIR)/.deps
-BATCH = $(EMACS) -Q --batch \
+# Prefer newer sources, so a stale .elc from `make compile' isn't tested.
+BATCH = $(EMACS) -Q --batch --eval '(setq load-prefer-newer t)' \
 	--eval '(setq package-user-dir "$(DEPS)")' -f package-initialize -L .
 
 .PHONY: all compile test integration lint deps clean

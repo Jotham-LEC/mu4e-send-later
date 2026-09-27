@@ -1,7 +1,8 @@
 # mu4e-send-later
 
-Schedule an email to go out later instead of now, from any Emacs mail client
-built on `message-mode`: mu4e, notmuch, Gnus, org-msg.
+Schedule an email in mu4e to go out later instead of now, whether you write it
+in plain `message-mode` or with org-msg. Scheduled mail shows up in mu4e, where
+you can read, edit, reschedule, send or cancel it.
 
 - **Emacs doesn't need to be running.** On GNU/Linux a systemd user timer does
   the waking; on macOS a launchd job. Mail sent while the laptop was asleep goes
@@ -34,15 +35,29 @@ Emacs starts:
 (mu4e-send-later-mode 1)
 ```
 
-There is no default key binding. For example:
+Add a bookmark for the scheduled mail. It lives in its own maildir,
+`mu4e-send-later-maildir` (`/scheduled` under mu's root); make sure your mail
+sync doesn't upload it. mbsync only syncs the folders its channels name.
 
 ```elisp
-(with-eval-after-load 'message
-  (define-key message-mode-map (kbd "C-c C-S-s") #'mu4e-send-later))
+(add-to-list 'mu4e-bookmarks
+             '(:name "Scheduled" :query "maildir:/scheduled" :key ?s))
+```
+
+There are no default key bindings. For example:
+
+```elisp
+(with-eval-after-load 'mu4e
+  (define-key mu4e-compose-mode-map (kbd "C-c C-S-s") #'mu4e-send-later)
+  (dolist (map (list mu4e-headers-mode-map mu4e-view-mode-map))
+    (define-key map (kbd "C-c s e") #'mu4e-send-later-edit)
+    (define-key map (kbd "C-c s r") #'mu4e-send-later-reschedule)
+    (define-key map (kbd "C-c s s") #'mu4e-send-later-send-now)
+    (define-key map (kbd "C-c s c") #'mu4e-send-later-cancel)))
 ```
 
 org-msg drafts use their own mode, derived from `org-mode` rather than
-`message-mode`, so bind it there too:
+`message-mode`, so bind `mu4e-send-later` there too:
 
 ```elisp
 (with-eval-after-load 'org-msg
@@ -57,9 +72,17 @@ org-msg's check for a forgotten attachment runs then too.
 | | |
 |---|---|
 | `M-x mu4e-send-later` | in a draft: ask for a time, confirm it, queue the message |
-| `M-x mu4e-send-later-list` | the queue; `RET` view, `s` send now, `r` reschedule, `c` cancel |
+| `M-x mu4e-send-later-edit` | unschedule it and reopen the draft as you wrote it, org-msg included |
+| `M-x mu4e-send-later-reschedule` | move it to another time |
+| `M-x mu4e-send-later-send-now` | send it now, or retry it after it failed |
+| `M-x mu4e-send-later-cancel` | unschedule it, keeping a copy in the queue's `cancelled/` |
+| `M-x mu4e-send-later-list` | the queue with its state and last error; `RET` view, `e` `r` `s` `c` as above |
 | `M-x mu4e-send-later-check` | send anything overdue, re-arm, report failures |
 | `M-x mu4e-send-later-install-login-job` | also send overdue mail at login, without opening Emacs |
+
+The four commands in the middle act on the scheduled message at point, in the
+Scheduled bookmark (the message list or an open message) or in the list. In mu4e
+the date shown is when it will be sent.
 
 The time is read by `org-read-date`: `+2h`, `16:30`, `+1d 8:30`, `mon 14:00`.
 You're always shown the date it was read as before anything is queued, because
@@ -88,6 +111,12 @@ state of your interactive session.
 `mu4e-send-later-backend` defaults to `auto`, which picks the first that works.
 X11 or Wayland makes no difference.
 
+For mu4e, each queued message is also copied into `mu4e-send-later-maildir`,
+dated when it is due, and added to mu's index; the copy is removed once the
+message is sent, edited or cancelled. Only your interactive Emacs touches that
+maildir. It catches up when mu4e starts, after each change you make, and, by
+watching the queue, when the background sender sends something.
+
 ## When things go wrong
 
 At scheduling time, each of these is an error, and the draft stays open:
@@ -115,8 +144,12 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
   copies, deleting the draft, marking the parent as replied. (Gmail users with
   `mu4e-sent-messages-behavior` set to `delete` get the Sent copy at the real
   send time, from Gmail.)
-- Cancelling keeps the rendered message in `cancelled/`; it can't be reopened as
-  an editable org-msg draft.
+- mu4e shows each change straight away, but a newly scheduled message only
+  appears in a Scheduled list that is already open once you refresh it (`g`).
+- Messages scheduled before the draft was kept (before 2026-09-28) can't be
+  edited, only cancelled and written again.
+- mu4e is updated through its internal `mu4e--server-add` and
+  `mu4e--server-remove`, as of mu 1.14.
 - The background Emacs has no access to secrets unlocked in your session. Most
   sendmail setups are fine, including msmtp with `passwordeval`. smtpmail with
   `~/.authinfo.gpg` needs gpg-agent to already have the passphrase cached.

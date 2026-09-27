@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Jotham Lim
 
 ;; Author: Jotham Lim <jotham@cothink.ing>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: mail
 ;; URL: https://github.com/Jotham-LEC/mu4e-send-later
@@ -26,8 +26,8 @@
 
 ;;; Commentary:
 
-;; Schedule a message to go out later instead of now.  Works with any
-;; mail client built on `message-mode': mu4e, notmuch, Gnus, org-msg.
+;; Schedule a message in mu4e to go out later instead of now, whether
+;; written in `message-mode' or with org-msg.
 ;;
 ;; `mu4e-send-later' renders the draft exactly as a normal send would,
 ;; but instead of handing it to `message-send-mail-function' it stores
@@ -47,12 +47,15 @@
 ;;
 ;;   (mu4e-send-later-mode 1)   ; sends overdue mail and re-arms at startup
 ;;
-;; then `M-x mu4e-send-later' in a draft, and `M-x mu4e-send-later-list'
-;; to see or cancel what is queued.
+;; then `M-x mu4e-send-later' in a draft.  Scheduled mail shows in mu4e
+;; under `mu4e-send-later-maildir'; on a message there, or in `M-x
+;; mu4e-send-later-list', `mu4e-send-later-edit', `-reschedule',
+;; `-send-now' and `-cancel' act on it.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'filenotify)
 (require 'message)
 (require 'rfc2047)
 (require 'subr-x)
@@ -63,6 +66,14 @@
                   (&optional with-time to-time from-string prompt
                              default-time default-input inactive))
 (declare-function org-msg-sanity-check "ext:org-msg" ())
+(declare-function org-msg-edit-mode "ext:org-msg" ())
+(declare-function mu4e-running-p "ext:mu4e-server" ())
+(declare-function mu4e-root-maildir "ext:mu4e-server" ())
+(declare-function mu4e--server-add "ext:mu4e-server" (path))
+(declare-function mu4e--server-remove "ext:mu4e-server" (docid-or-path))
+(declare-function mu4e-message-at-point "ext:mu4e-message" (&optional noerror))
+(declare-function mu4e--draft "ext:mu4e-draft" (compose-type compose-func &optional parent))
+(declare-function mu4e--delimit-headers "ext:mu4e-draft" (&optional undelimit))
 
 (defvar mu4e-send-later-mode)
 
@@ -115,6 +126,13 @@ queue for you to retry or cancel from `mu4e-send-later-list'."
 The background Emacs doesn't load your init file, so anything your
 `message-send-mail-function' reads must be listed here."
   :type '(repeat variable))
+
+(defcustom mu4e-send-later-maildir "/scheduled"
+  "Maildir, relative to mu's root, where mu4e shows scheduled mail.
+It holds a copy of each queued message, dated when it is due, so a
+mu4e bookmark on it lists what is scheduled.  Make sure your mail
+sync doesn't upload it."
+  :type 'string)
 
 ;;;; Errors
 
@@ -505,6 +523,18 @@ Return that time, or nil if nothing is pending."
 (defvar mu4e-send-later--preflight-ok nil
   "Preflight checks that passed this session, to avoid repeating them.")
 
+(defvar mu4e-send-later--draft nil
+  "The draft being scheduled, as the user wrote it, for `--enqueue'.
+A plist of :text, :mode and :file, the file it was saved as.")
+
+(defun mu4e-send-later--capture-draft ()
+  "The current draft as the user wrote it, before sending renders it."
+  (list :text (save-restriction
+                (widen)
+                (buffer-substring-no-properties (point-min) (point-max)))
+        :mode major-mode
+        :file buffer-file-name))
+
 (defun mu4e-send-later--readable-p (value)
   "Non-nil if VALUE survives being printed and read back."
   (condition-case nil
@@ -571,7 +601,9 @@ Called where `message-send-mail-function' would be.  Return the new ID."
                      :variables vars
                      :from (mu4e-send-later--header "From")
                      :to (mu4e-send-later--header "To")
-                     :subject (mu4e-send-later--header "Subject"))))
+                     :subject (mu4e-send-later--header "Subject")
+                     :draft-mode (plist-get mu4e-send-later--draft :mode)
+                     :draft-file (plist-get mu4e-send-later--draft :file))))
     (mu4e-send-later--preflight backend send-function vars)
     (mu4e-send-later--with-lock
       (make-directory tmp t)
@@ -580,6 +612,10 @@ Called where `message-send-mail-function' would be.  Return the new ID."
         (let ((coding-system-for-write
                (if enable-multibyte-characters 'utf-8-unix 'no-conversion)))
           (write-region nil nil (expand-file-name "message" tmp) nil 'silent)))
+      (when mu4e-send-later--draft
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region (plist-get mu4e-send-later--draft :text) nil
+                        (expand-file-name "draft" tmp) nil 'silent)))
       (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
       ;; The rename is what makes the item visible to a sender.
       (rename-file tmp (mu4e-send-later--item-dir id))
@@ -623,6 +659,7 @@ TIME is a Unix time in seconds; interactively it is read with
                  (list (mu4e-send-later--read-time))))
   (mu4e-send-later--check-draft)
   (let ((send-function message-send-mail-function)
+        (mu4e-send-later--draft (mu4e-send-later--capture-draft))
         (id nil))
     (unless (and (symbolp send-function) (fboundp send-function))
       (signal 'mu4e-send-later-error
@@ -637,6 +674,7 @@ TIME is a Unix time in seconds; interactively it is read with
     (unless id
       (signal 'mu4e-send-later-error
               '("The message was sent without passing through the scheduler; check it was not sent now")))
+    (mu4e-send-later--report-errors #'mu4e-send-later--mu4e-sync)
     (unless mu4e-send-later-mode
       (display-warning 'mu4e-send-later
                        "`mu4e-send-later-mode' is off, so mail that falls due while Emacs and the scheduler are down won't be sent when Emacs next starts"))
@@ -647,8 +685,8 @@ TIME is a Unix time in seconds; interactively it is read with
 
 ;;;; Sending
 
-(defun mu4e-send-later--restamp-date (separator)
-  "Set the Date header of the message in this buffer to now.
+(defun mu4e-send-later--restamp-date (separator &optional time)
+  "Set the Date header of the message in this buffer to TIME, or now.
 SEPARATOR ends the headers."
   (goto-char (point-min))
   (unless (re-search-forward (concat "^" (regexp-quote separator) "$") nil t)
@@ -657,7 +695,7 @@ SEPARATOR ends the headers."
     (narrow-to-region (point-min) (match-beginning 0))
     (goto-char (point-min))
     (when (re-search-forward "^Date:.*\\(?:\n[ \t].*\\)*" nil t)
-      (replace-match (concat "Date: " (message-make-date)) t t))))
+      (replace-match (concat "Date: " (message-make-date time)) t t))))
 
 (defun mu4e-send-later--send (id)
   "Send queued item ID now, signalling if that fails."
@@ -796,6 +834,7 @@ Call ON-EXIT with the exit status when it finishes."
            (when (eq (mu4e-send-later--backend) 'emacs)
              (mu4e-send-later--report-errors
               (lambda () (mu4e-send-later--with-lock (mu4e-send-later--arm)))))
+           (mu4e-send-later--changed)
            (when on-exit (funcall on-exit status))))))))
 
 ;;;; Startup check
@@ -842,7 +881,13 @@ overdue mail is sent, the wake-up is re-armed after a reboot, and
 failed messages are reported."
   :global t
   :group 'mu4e-send-later
+  (mu4e-send-later--unwatch)
+  (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
+    (remove-hook hook #'mu4e-send-later--mu4e-sync-safely))
   (when mu4e-send-later-mode
+    (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
+      (add-hook hook #'mu4e-send-later--mu4e-sync-safely))
+    (mu4e-send-later--watch)
     (if after-init-time
         (mu4e-send-later-check)
       (add-hook 'after-init-hook #'mu4e-send-later-check))))
@@ -930,14 +975,240 @@ Re-run this if the Emacs executable moves, e.g. after an upgrade."
                    file (match-string 1))
            :error))))))
 
+;;;; mu4e
+
+(defconst mu4e-send-later--mirror-regexp
+  "\\`\\([0-9]+-[0-9a-f]+\\)\\.send-later:2,"
+  "Matches the file name of a message in `mu4e-send-later-maildir'.")
+
+(defvar mu4e-send-later--watch nil
+  "The `file-notify' watch on the queue directory.")
+
+(defvar mu4e-send-later--sync-timer nil
+  "Timer that resyncs mu4e shortly after the queue changes.")
+
+(defvar mu4e-send-later--mirrored (make-hash-table :test #'equal)
+  "Due time each message in `mu4e-send-later-maildir' was written for, by ID.")
+
+(defun mu4e-send-later--mirror-dir ()
+  "The cur/ directory of `mu4e-send-later-maildir', or nil without mu4e."
+  (when (and (fboundp 'mu4e-running-p) (mu4e-running-p))
+    (expand-file-name (concat (string-trim mu4e-send-later-maildir "/" "/") "/cur")
+                      (mu4e-root-maildir))))
+
+(defun mu4e-send-later--mirror-id (file)
+  "The queue ID that FILE, in `mu4e-send-later-maildir', stands for."
+  (let ((name (file-name-nondirectory file)))
+    (when (string-match mu4e-send-later--mirror-regexp name)
+      (match-string 1 name))))
+
+(defun mu4e-send-later--write-mirror (id file)
+  "Write queued item ID to FILE as a plain message, dated when it is due."
+  (let ((meta (mu4e-send-later--meta id))
+        (tmp (expand-file-name (concat "../tmp/" (file-name-nondirectory file))
+                               (file-name-directory file))))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally
+       (expand-file-name "message" (mu4e-send-later--item-dir id)))
+      (mu4e-send-later--restamp-date (plist-get meta :separator) (plist-get meta :due))
+      (goto-char (point-min))
+      (re-search-forward (concat "^" (regexp-quote (plist-get meta :separator)) "$"))
+      (replace-match "" t t)
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region nil nil tmp nil 'silent)))
+    (rename-file tmp file t)))
+
+(defun mu4e-send-later--mu4e-sync ()
+  "Make `mu4e-send-later-maildir' match the queue, and tell mu4e.
+Does nothing unless mu4e is running."
+  (when-let* ((dir (mu4e-send-later--mirror-dir)))
+    (dolist (sub '("cur" "new" "tmp"))
+      (make-directory (expand-file-name (concat "../" sub) dir) t))
+    (let ((ids (mu4e-send-later--ids)))
+      (dolist (file (directory-files dir t "\\.send-later:2,"))
+        (let ((id (mu4e-send-later--mirror-id file)))
+          (unless (member id ids)
+            ;; mu deletes the file as well.
+            (mu4e--server-remove file)
+            (remhash id mu4e-send-later--mirrored))))
+      (dolist (id ids)
+        (let ((file (expand-file-name (concat id ".send-later:2,S") dir)))
+          ;; Sent between listing the queue and here.
+          (ignore-error file-missing
+            (let ((due (plist-get (mu4e-send-later--meta id) :due)))
+              (unless (and (file-exists-p file)
+                           (eql due (gethash id mu4e-send-later--mirrored)))
+                (mu4e-send-later--write-mirror id file)
+                (mu4e--server-add file)
+                (puthash id due mu4e-send-later--mirrored)))))))))
+
+(defun mu4e-send-later--mu4e-sync-safely ()
+  "Like `mu4e-send-later--mu4e-sync', but only warn if it fails."
+  (mu4e-send-later--report-errors #'mu4e-send-later--mu4e-sync))
+
+(defun mu4e-send-later--changed ()
+  "Show a change to the queue in the list and in mu4e."
+  (when-let* ((buffer (get-buffer "*mu4e-send-later*")))
+    (with-current-buffer buffer (revert-buffer)))
+  (mu4e-send-later--mu4e-sync-safely))
+
+(defun mu4e-send-later--queue-event (event)
+  "Resync mu4e soon after EVENT, which may be an item coming or going."
+  (when (cl-some (lambda (file)
+                   (and (stringp file)
+                        (string-match-p "\\`[0-9]+-[0-9a-f]+\\'" (file-name-nondirectory file))))
+                 (cddr event))
+    (when mu4e-send-later--sync-timer
+      (cancel-timer mu4e-send-later--sync-timer))
+    (setq mu4e-send-later--sync-timer
+          (run-with-timer 1 nil #'mu4e-send-later--changed))))
+
+(defun mu4e-send-later--watch ()
+  "Resync mu4e whenever the queue changes, as when a background send ends."
+  (make-directory (mu4e-send-later--dir) t)
+  (setq mu4e-send-later--watch
+        (ignore-error file-notify-error
+          (file-notify-add-watch (mu4e-send-later--dir) '(change)
+                                 #'mu4e-send-later--queue-event))))
+
+(defun mu4e-send-later--unwatch ()
+  "Stop `mu4e-send-later--watch'."
+  (when mu4e-send-later--watch
+    (file-notify-rm-watch mu4e-send-later--watch)
+    (setq mu4e-send-later--watch nil)))
+
+(defun mu4e-send-later--open-draft (text meta)
+  "Open TEXT, a draft queued with META, for editing."
+  (let ((file (plist-get meta :draft-file)))
+    (if (and file (fboundp 'mu4e--draft))
+        ;; Back in the Drafts maildir it was scheduled from, opened the
+        ;; way `mu4e-compose-edit' opens a draft.
+        (let ((path (expand-file-name
+                     (format "cur/%s.%06x.mu4e-send-later:2,DS"
+                             (format-time-string "%s") (random #xffffff))
+                     (file-name-directory (directory-file-name (file-name-directory file))))))
+          (with-temp-buffer
+            (insert text)
+            (goto-char (point-min))
+            (when (re-search-forward (concat "^" (regexp-quote mail-header-separator) "$") nil t)
+              (replace-match "" t t))
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region nil nil path nil 'silent)))
+          (when (mu4e-running-p)
+            (mu4e--server-add path))
+          (with-current-buffer
+              (mu4e--draft 'edit
+                           (lambda ()
+                             (with-current-buffer (find-file-noselect path)
+                               (mu4e--delimit-headers)
+                               (current-buffer))))
+            ;; org-msg only takes over drafts it would have started itself.
+            (when (and (eq (plist-get meta :draft-mode) 'org-msg-edit-mode)
+                       (fboundp 'org-msg-edit-mode)
+                       (not (derived-mode-p 'org-msg-edit-mode)))
+              (let ((address user-mail-address))
+                (org-msg-edit-mode)
+                (setq-local user-mail-address address))
+              (set-buffer-modified-p nil))))
+      (pop-to-buffer (generate-new-buffer "*unsent mail*"))
+      (insert text)
+      (funcall (or (plist-get meta :draft-mode) #'message-mode))
+      (set-buffer-modified-p nil))))
+
+;;;; Acting on scheduled mail
+
+(defun mu4e-send-later--id-at-point ()
+  "ID of the scheduled message at point, in the list or in mu4e."
+  (let ((id (if (derived-mode-p 'mu4e-send-later-list-mode)
+                (tabulated-list-get-id)
+              (when-let* ((msg (and (fboundp 'mu4e-message-at-point)
+                                    (mu4e-message-at-point t)))
+                          (path (plist-get msg :path)))
+                (mu4e-send-later--mirror-id path)))))
+    (unless id
+      (user-error "Not on a scheduled message"))
+    (unless (file-exists-p (expand-file-name "meta.eld" (mu4e-send-later--item-dir id)))
+      (mu4e-send-later--changed)
+      (user-error "That message is no longer scheduled"))
+    id))
+
+(defun mu4e-send-later--unschedule (id)
+  "Take ID out of the queue, keeping a copy in cancelled/."
+  (mu4e-send-later--with-lock
+    (make-directory (mu4e-send-later--dir "cancelled") t)
+    (rename-file (mu4e-send-later--item-dir id) (mu4e-send-later--dir "cancelled" id))
+    (mu4e-send-later--arm))
+  (mu4e-send-later--log "cancelled %s" id)
+  (mu4e-send-later--changed))
+
+(defun mu4e-send-later--update (id fn)
+  "Under the lock, replace ID's metadata with FN applied to it, then re-arm."
+  (mu4e-send-later--with-lock
+    (mu4e-send-later--set-meta id (funcall fn (mu4e-send-later--meta id)))
+    (mu4e-send-later--arm))
+  (mu4e-send-later--changed))
+
+(defun mu4e-send-later-cancel ()
+  "Unschedule the message at point, keeping a copy in cancelled/."
+  (interactive)
+  (let* ((id (mu4e-send-later--id-at-point))
+         (meta (mu4e-send-later--meta id)))
+    (when (yes-or-no-p (format "Cancel \"%s\"? " (plist-get meta :subject)))
+      (mu4e-send-later--unschedule id)
+      (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id)))))
+
+(defun mu4e-send-later-edit ()
+  "Unschedule the message at point and reopen it as a draft.
+Schedule it again with `mu4e-send-later' once edited."
+  (interactive)
+  (let* ((id (mu4e-send-later--id-at-point))
+         (meta (mu4e-send-later--meta id))
+         (file (expand-file-name "draft" (mu4e-send-later--item-dir id))))
+    (unless (file-exists-p file)
+      (user-error "This message was scheduled without keeping its draft; cancel it and write it again"))
+    (let ((text (with-temp-buffer
+                  (let ((coding-system-for-read 'utf-8-unix))
+                    (insert-file-contents file))
+                  (buffer-string))))
+      (mu4e-send-later--unschedule id)
+      (mu4e-send-later--open-draft text meta)
+      (message "Unscheduled; schedule it again when you're done"))))
+
+(defun mu4e-send-later-send-now ()
+  "Send the message at point now, retrying it if it had failed."
+  (interactive)
+  (mu4e-send-later--update (mu4e-send-later--id-at-point)
+                           (lambda (meta)
+                             (thread-first meta
+                                           (plist-put :state 'pending)
+                                           (plist-put :attempts 0)
+                                           (plist-put :next-attempt nil)
+                                           (plist-put :due (floor (float-time))))))
+  (mu4e-send-later--flush-async)
+  (message "Sending…"))
+
+(defun mu4e-send-later-reschedule (time)
+  "Move the message at point to TIME."
+  (interactive (progn (mu4e-send-later--id-at-point)
+                      (list (mu4e-send-later--read-time))))
+  (mu4e-send-later--update (mu4e-send-later--id-at-point)
+                           (lambda (meta)
+                             (thread-first meta
+                                           (plist-put :state 'pending)
+                                           (plist-put :attempts 0)
+                                           (plist-put :next-attempt nil)
+                                           (plist-put :due time)))))
+
 ;;;; Queue listing
 
 (defvar-keymap mu4e-send-later-list-mode-map
   :doc "Keymap for `mu4e-send-later-list-mode'."
   "RET" #'mu4e-send-later-list-view
-  "c" #'mu4e-send-later-list-cancel
-  "s" #'mu4e-send-later-list-send-now
-  "r" #'mu4e-send-later-list-reschedule)
+  "e" #'mu4e-send-later-edit
+  "c" #'mu4e-send-later-cancel
+  "s" #'mu4e-send-later-send-now
+  "r" #'mu4e-send-later-reschedule)
 
 (define-derived-mode mu4e-send-later-list-mode tabulated-list-mode "Send-Later"
   "List of scheduled messages.
@@ -976,60 +1247,10 @@ Re-run this if the Emacs executable moves, e.g. after an upgrade."
     (tabulated-list-print)
     (pop-to-buffer (current-buffer))))
 
-(defun mu4e-send-later--list-id ()
-  "ID of the item at point."
-  (or (tabulated-list-get-id) (user-error "No scheduled message here")))
-
 (defun mu4e-send-later-list-view ()
   "Show the raw message at point."
   (interactive)
-  (view-file (expand-file-name "message" (mu4e-send-later--item-dir (mu4e-send-later--list-id)))))
-
-(defun mu4e-send-later--update (id fn)
-  "Under the lock, replace ID's metadata with FN applied to it, then re-arm."
-  (mu4e-send-later--with-lock
-    (mu4e-send-later--set-meta id (funcall fn (mu4e-send-later--meta id)))
-    (mu4e-send-later--arm)))
-
-(defun mu4e-send-later-list-cancel ()
-  "Unschedule the message at point, keeping a copy in cancelled/."
-  (interactive)
-  (let* ((id (mu4e-send-later--list-id))
-         (meta (mu4e-send-later--meta id)))
-    (when (yes-or-no-p (format "Cancel \"%s\"? " (plist-get meta :subject)))
-      (mu4e-send-later--with-lock
-        (make-directory (mu4e-send-later--dir "cancelled") t)
-        (rename-file (mu4e-send-later--item-dir id) (mu4e-send-later--dir "cancelled" id))
-        (mu4e-send-later--arm))
-      (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id))
-      (revert-buffer))))
-
-(defun mu4e-send-later-list-send-now ()
-  "Send the message at point now, retrying it if it had failed."
-  (interactive)
-  (mu4e-send-later--update (mu4e-send-later--list-id)
-                           (lambda (meta)
-                             (thread-first meta
-                                           (plist-put :state 'pending)
-                                           (plist-put :attempts 0)
-                                           (plist-put :next-attempt nil)
-                                           (plist-put :due (floor (float-time))))))
-  (mu4e-send-later--flush-async (lambda (_) (when (get-buffer "*mu4e-send-later*")
-                                               (with-current-buffer "*mu4e-send-later*"
-                                                 (revert-buffer)))))
-  (message "Sending…"))
-
-(defun mu4e-send-later-list-reschedule (time)
-  "Move the message at point to TIME."
-  (interactive (list (mu4e-send-later--read-time)))
-  (mu4e-send-later--update (mu4e-send-later--list-id)
-                           (lambda (meta)
-                             (thread-first meta
-                                           (plist-put :state 'pending)
-                                           (plist-put :attempts 0)
-                                           (plist-put :next-attempt nil)
-                                           (plist-put :due time))))
-  (revert-buffer))
+  (view-file (expand-file-name "message" (mu4e-send-later--item-dir (mu4e-send-later--id-at-point)))))
 
 (provide 'mu4e-send-later)
 ;;; mu4e-send-later.el ends here

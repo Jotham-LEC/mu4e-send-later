@@ -426,6 +426,237 @@ Skips the test where org-msg isn't installed, except on CI."
 
 ;;;; Integration
 
+;;;; mu4e
+
+(defvar msl-test--mu nil "Calls to the fake mu server, oldest first.")
+(defvar mu4e-main-rendered-hook)
+(defvar mu4e-index-updated-hook)
+
+(defmacro msl-test--with-mu4e (&rest body)
+  "Run BODY with a fake running mu4e over a temporary root maildir.
+The fake server records adds and removes, and like mu deletes the
+file it removes."
+  (declare (indent 0) (debug t))
+  `(let ((root (make-temp-file "msl-mail-" t))
+         (msl-test--mu nil)
+         (mu4e-send-later--mirrored (make-hash-table :test #'equal)))
+     (cl-letf (((symbol-function 'mu4e-running-p) (lambda () t))
+               ((symbol-function 'mu4e-root-maildir) (lambda () root))
+               ((symbol-function 'mu4e--server-add)
+                (lambda (path) (setq msl-test--mu (append msl-test--mu (list (list 'add path))))))
+               ((symbol-function 'mu4e--server-remove)
+                (lambda (path)
+                  (setq msl-test--mu (append msl-test--mu (list (list 'remove path))))
+                  (when (file-exists-p path) (delete-file path)))))
+       (unwind-protect (progn ,@body)
+         (delete-directory root t)))))
+
+(defun msl-test--mirror (id)
+  "Where ID's copy for mu4e goes."
+  (expand-file-name (concat "scheduled/cur/" id ".send-later:2,S") (mu4e-root-maildir)))
+
+(defun msl-test--in-mu4e-on (file fn)
+  "Call FN as if in mu4e with point on the message at FILE."
+  (cl-letf (((symbol-function 'mu4e-message-at-point)
+             (lambda (&optional _noerror) (list :path file))))
+    (with-temp-buffer (funcall fn))))
+
+(ert-deftest msl-test-mu4e-shows-scheduled-mail-dated-when-due ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((result (msl-test--schedule 3600 "Mirrored"))
+             (id (car result))
+             (due (plist-get (mu4e-send-later--meta id) :due))
+             (file (msl-test--mirror id)))
+        (kill-buffer (cdr result))
+        (should (equal msl-test--mu (list (list 'add file))))
+        (dolist (sub '("cur" "new" "tmp"))
+          (should (file-directory-p (expand-file-name (concat "scheduled/" sub) root))))
+        (with-temp-buffer
+          (insert-file-contents-literally file)
+          (goto-char (point-min))
+          (should (re-search-forward "^Subject: Mirrored$" nil t))
+          ;; Dated when due, so mu4e shows and sorts by send time.
+          (should (re-search-forward
+                   (concat "^Date: " (regexp-quote (message-make-date due)) "$") nil t))
+          ;; A real message: headers end at a blank line, not the separator.
+          (goto-char (point-min))
+          (should-not (search-forward mail-header-separator nil t))
+          (should (re-search-forward "^$" nil t))
+          (should (search-forward "Body with" nil t)))
+        ;; Nothing changed, so nothing is re-sent to mu.
+        (mu4e-send-later--mu4e-sync)
+        (should (= (length msl-test--mu) 1))))))
+
+(ert-deftest msl-test-mu4e-not-running-leaves-maildir-alone ()
+  (msl-test--with-queue
+    (let ((root (make-temp-file "msl-mail-" t)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'mu4e-running-p) (lambda () nil))
+                    ((symbol-function 'mu4e-root-maildir) (lambda () root)))
+            (kill-buffer (cdr (msl-test--schedule 3600)))
+            (should-not (directory-files root nil "\\`[^.]")))
+        (delete-directory root t)))))
+
+(ert-deftest msl-test-mu4e-reschedule-and-cancel-from-mu4e ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((result (msl-test--schedule 3600 "Moved"))
+             (id (car result))
+             (file (msl-test--mirror id))
+             (later (+ (floor (float-time)) 7200)))
+        (kill-buffer (cdr result))
+        (setq msl-test--mu nil)
+        (msl-test--in-mu4e-on file (lambda () (mu4e-send-later-reschedule later)))
+        (should (equal (plist-get (mu4e-send-later--meta id) :due) later))
+        (should (equal msl-test--armed (list later)))
+        ;; Rewritten in place, so mu4e updates the line it shows.
+        (should (equal msl-test--mu (list (list 'add file))))
+        (with-temp-buffer
+          (insert-file-contents-literally file)
+          (should (search-forward (message-make-date later) nil t)))
+        (setq msl-test--mu nil)
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+          (msl-test--in-mu4e-on file #'mu4e-send-later-cancel))
+        (should-not (mu4e-send-later--ids))
+        (should (file-exists-p (mu4e-send-later--dir "cancelled" id "message")))
+        (should (equal msl-test--mu (list (list 'remove file))))
+        (should-not (file-exists-p file))
+        ;; Acting on it again is refused rather than resurrecting it.
+        (should-error (msl-test--in-mu4e-on file #'mu4e-send-later-send-now)
+                      :type 'user-error)))))
+
+(ert-deftest msl-test-mu4e-drops-mail-sent-in-the-background ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((sent (car (msl-test--schedule 3600 "Sent")))
+             (kept (car (msl-test--schedule 7200 "Kept"))))
+        (dolist (buffer (buffer-list))
+          (when (string-prefix-p "*sent" (buffer-name buffer)) (kill-buffer buffer)))
+        (msl-test--make-due sent)
+        ;; As a background Emacs would, which knows nothing of mu4e.
+        (cl-letf (((symbol-function 'mu4e-send-later--mu4e-sync) #'ignore))
+          (mu4e-send-later--flush))
+        (should (file-exists-p (msl-test--mirror sent)))
+        (setq msl-test--mu nil)
+        (mu4e-send-later--mu4e-sync)
+        (should (equal msl-test--mu (list (list 'remove (msl-test--mirror sent)))))
+        (should (file-exists-p (msl-test--mirror kept)))))))
+
+(ert-deftest msl-test-queue-event-resyncs-only-for-items ()
+  (let ((mu4e-send-later--sync-timer nil))
+    (unwind-protect
+        (progn
+          (mu4e-send-later--queue-event (list 'd 'created "/q/.lock"))
+          (mu4e-send-later--queue-event (list 'd 'changed "/q/log"))
+          (should-not mu4e-send-later--sync-timer)
+          (mu4e-send-later--queue-event (list 'd 'renamed "/q/.tmp-1-a" "/q/1790000000-abcdef"))
+          (should (timerp mu4e-send-later--sync-timer))
+          (should (eq (timer--function mu4e-send-later--sync-timer) #'mu4e-send-later--changed)))
+      (when mu4e-send-later--sync-timer (cancel-timer mu4e-send-later--sync-timer)))))
+
+;; The mode, not just the command, is what keeps mu4e current.
+(ert-deftest msl-test-mode-hooks-into-mu4e-and-the-queue ()
+  (msl-test--with-queue
+    (let ((mu4e-main-rendered-hook nil)
+          (mu4e-index-updated-hook nil)
+          (mu4e-send-later--watch nil)
+          (mu4e-send-later-mode nil))
+      (cl-letf (((symbol-function 'mu4e-send-later-check) #'ignore))
+        (unwind-protect
+            (progn
+              (mu4e-send-later-mode 1)
+              (should (memq #'mu4e-send-later--mu4e-sync-safely mu4e-main-rendered-hook))
+              (should (memq #'mu4e-send-later--mu4e-sync-safely mu4e-index-updated-hook))
+              (should (file-notify-valid-p mu4e-send-later--watch))
+              (mu4e-send-later-mode -1)
+              (should-not mu4e-main-rendered-hook)
+              (should-not mu4e-index-updated-hook)
+              (should-not mu4e-send-later--watch))
+          (mu4e-send-later-mode -1))))))
+
+(ert-deftest msl-test-not-a-scheduled-message ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (should-error (msl-test--in-mu4e-on (expand-file-name "acct/Inbox/cur/1.2.host:2,S" root)
+                                          #'mu4e-send-later-edit)
+                    :type 'user-error)
+      (should-error (with-temp-buffer (mu4e-send-later-cancel)) :type 'user-error))))
+
+(ert-deftest msl-test-edit-reopens-the-draft-as-written ()
+  (msl-test--with-queue
+    (let* ((result (msl-test--schedule 3600 "Editable"))
+           (id (car result)))
+      (kill-buffer (cdr result))
+      (mu4e-send-later-list)
+      (unwind-protect
+          (with-current-buffer "*mu4e-send-later*"
+            (goto-char (point-min))
+            (search-forward "Editable")
+            (mu4e-send-later-edit)
+            (should-not (mu4e-send-later--ids))
+            (should (file-exists-p (mu4e-send-later--dir "cancelled" id "draft")))
+            (should-not msl-test--armed)
+            ;; The source, not the rendered message: unencoded, separator kept.
+            (should (derived-mode-p 'message-mode))
+            (should (string-prefix-p "*unsent mail*" (buffer-name)))
+            (goto-char (point-min))
+            (should (search-forward "Subject: Editable\n" nil t))
+            (should (search-forward (concat mail-header-separator "\nBody with ünïcode.") nil t))
+            (should-not (save-excursion (goto-char (point-min)) (search-forward "Message-ID" nil t)))
+            (kill-buffer))
+        (kill-buffer "*mu4e-send-later*")))))
+
+(ert-deftest msl-test-edit-org-msg-draft-returns-to-its-drafts-folder ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((drafts (expand-file-name "acct/Drafts/cur/" root))
+             (buffer (msl-test--org-msg-draft '(utf-8 html) "This is *bold*."))
+             (mail-user-agent 'message-user-agent)
+             (message-interactive t)
+             opened id)
+        (make-directory drafts t)
+        (with-current-buffer buffer
+          (setq buffer-file-name (expand-file-name "1.2.host:2,DS" drafts))
+          (setq id (mu4e-send-later (+ (floor (float-time)) 3600))))
+        (kill-buffer buffer)
+        (setq msl-test--mu nil)
+        (cl-letf (((symbol-function 'mu4e--draft)
+                   (lambda (type fn &optional _parent)
+                     (setq opened (list type (funcall fn)))
+                     (cadr opened)))
+                  ((symbol-function 'mu4e--delimit-headers) #'ignore))
+          (msl-test--in-mu4e-on (msl-test--mirror id) #'mu4e-send-later-edit))
+        (should-not (mu4e-send-later--ids))
+        (should (eq (car opened) 'edit))
+        ;; Back in org-msg, even where org-msg wouldn't take it over itself.
+        (should (eq (buffer-local-value 'major-mode (cadr opened)) 'org-msg-edit-mode))
+        (let ((path (buffer-file-name (cadr opened))))
+          (kill-buffer (cadr opened))
+          ;; A new draft in the Drafts maildir it came from, known to mu.
+          (should (equal (file-name-directory path) drafts))
+          (should (string-suffix-p ":2,DS" path))
+          (should (member (list 'add path) msl-test--mu))
+          (should (member (list 'remove (msl-test--mirror id)) msl-test--mu))
+          (with-temp-buffer
+            (insert-file-contents path)
+            ;; Saved like mu4e saves a draft: a blank line, not the separator.
+            (should-not (search-forward mail-header-separator nil t))
+            (should (search-forward "Subject: Org plans\n\n:PROPERTIES:" nil t))
+            (should (search-forward "This is *bold*." nil t))))))))
+
+(ert-deftest msl-test-edit-needs-a-kept-draft ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600))))
+      (delete-file (expand-file-name "draft" (mu4e-send-later--item-dir id)))
+      (mu4e-send-later-list)
+      (unwind-protect
+          (with-current-buffer "*mu4e-send-later*"
+            (goto-char (point-min))
+            (should-error (mu4e-send-later-edit) :type 'user-error)
+            (should (equal (mu4e-send-later--ids) (list id))))
+        (kill-buffer "*mu4e-send-later*")))))
+
 (ert-deftest msl-test-integration-systemd-end-to-end ()
   "Schedule through a real systemd timer and a fake sendmail."
   :tags '(:integration)
