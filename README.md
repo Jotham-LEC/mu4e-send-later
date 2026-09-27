@@ -41,6 +41,17 @@ There is no default key binding. For example:
   (define-key message-mode-map (kbd "C-c C-S-s") #'mu4e-send-later))
 ```
 
+org-msg drafts use their own mode, derived from `org-mode` rather than
+`message-mode`, so bind it there too:
+
+```elisp
+(with-eval-after-load 'org-msg
+  (define-key org-msg-edit-mode-map (kbd "C-c C-S-s") #'mu4e-send-later))
+```
+
+An org-msg draft is rendered to HTML and plain text when you schedule it, and
+org-msg's check for a forgotten attachment runs then too.
+
 ## Use
 
 | | |
@@ -121,6 +132,7 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 
 ```sh
 make compile   # byte-compile, warnings are errors
+make deps      # install org-msg from MELPA into .deps/, for its tests
 make test      # unit tests, against a fake scheduler and a fake send function
 make integration   # real systemd timers and a fake sendmail (GNU/Linux)
 make lint      # checkdoc

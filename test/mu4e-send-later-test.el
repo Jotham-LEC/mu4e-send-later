@@ -82,6 +82,32 @@
   (let ((meta (mu4e-send-later--meta id)))
     (mu4e-send-later--set-meta id (plist-put meta :due (1- (floor (float-time)))))))
 
+(defun msl-test--org-msg-draft (alternatives body)
+  "An org-msg draft buffer sending ALTERNATIVES, with Org BODY.
+Skips the test where org-msg isn't installed, except on CI."
+  (unless (or (require 'org-msg nil t) (getenv "CI"))
+    (ert-skip "org-msg is not installed; see `make deps'"))
+  (require 'org-msg)
+  (let ((buffer (generate-new-buffer "*msl-org-msg-draft*")))
+    (with-current-buffer buffer
+      (insert "From: Me <me@example.com>\n"
+              "To: You <you@example.com>\n"
+              "Subject: Org plans\n"
+              mail-header-separator "\n"
+              ":PROPERTIES:\n:reply-to: nil\n:attachment: nil\n"
+              (format ":alternatives: %S\n" alternatives)
+              ":END:\n\n" body "\n")
+      (org-msg-edit-mode)
+      (setq-local message-send-mail-function #'msl-test-send))
+    buffer))
+
+(defun msl-test--stored (id)
+  "The stored message of queued item ID, as a string."
+  (with-temp-buffer
+    (insert-file-contents-literally
+     (expand-file-name "message" (mu4e-send-later--item-dir id)))
+    (buffer-string)))
+
 ;;;; Scheduling
 
 (ert-deftest msl-test-schedule-queues-and-arms ()
@@ -113,6 +139,67 @@
           (should (re-search-forward header nil t)))
         (goto-char (point-min))
         (should-not (search-forward "ünïcode" nil t))))))
+
+(ert-deftest msl-test-schedule-org-msg-html-draft ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--org-msg-draft '(utf-8 html) "This is *bold*."))
+          (mail-user-agent 'message-user-agent)
+          (message-interactive t))
+      (unwind-protect
+          (let* ((id (with-current-buffer buffer
+                       (mu4e-send-later (+ (floor (float-time)) 3600))))
+                 (stored (msl-test--stored id)))
+            (should (equal (mu4e-send-later--ids) (list id)))
+            (should (equal (plist-get (mu4e-send-later--meta id) :subject) "Org plans"))
+            (should-not msl-test--sent)
+            ;; Stored as org-msg rendered it, not as the Org source.
+            (should (string-match-p "multipart/alternative" stored))
+            (should (string-match-p "text/html" stored))
+            (should (string-match-p "<b>bold</b>" stored))
+            (should-not (string-match-p ":PROPERTIES:" stored))
+            ;; And sent as stored.
+            (msl-test--make-due id)
+            (should (zerop (mu4e-send-later--flush)))
+            (should (string-match-p "<b>bold</b>" (plist-get (car msl-test--sent) :text))))
+        (kill-buffer buffer)))))
+
+(ert-deftest msl-test-schedule-org-msg-text-draft ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--org-msg-draft '(text) "Just words."))
+          (mail-user-agent 'message-user-agent)
+          (message-interactive t))
+      (unwind-protect
+          (let ((stored (msl-test--stored
+                         (with-current-buffer buffer
+                           (mu4e-send-later (+ (floor (float-time)) 3600))))))
+            (should (string-match-p "Just words\\." stored))
+            (should-not (string-match-p "text/html" stored))
+            (should-not (string-match-p ":PROPERTIES:" stored)))
+        (kill-buffer buffer)))))
+
+(ert-deftest msl-test-org-msg-missing-attachment-aborts ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--org-msg-draft '(utf-8 html) "See the attached report."))
+          (mail-user-agent 'message-user-agent)
+          (message-interactive t))
+      (unwind-protect
+          (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
+            (with-current-buffer buffer
+              (should (equal (should-error (mu4e-send-later (+ (floor (float-time)) 3600)))
+                             '(error "Aborted"))))
+            (should (buffer-live-p buffer))
+            (should-not (mu4e-send-later--ids))
+            (should-not msl-test--armed))
+        (kill-buffer buffer)))))
+
+(ert-deftest msl-test-non-draft-buffer-is-refused ()
+  (msl-test--with-queue
+    (with-temp-buffer
+      (org-mode)
+      (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                    :type 'user-error)
+      (should-error (call-interactively #'mu4e-send-later) :type 'user-error))
+    (should-not (mu4e-send-later--ids))))
 
 (ert-deftest msl-test-arm-failure-keeps-draft-and-queue-empty ()
   (msl-test--with-queue

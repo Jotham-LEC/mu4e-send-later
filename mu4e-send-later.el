@@ -607,17 +607,21 @@ Called where `message-send-mail-function' would be.  Return the new ID."
       (user-error "Not scheduled"))
     time))
 
+(defun mu4e-send-later--check-draft ()
+  "Signal unless the current buffer is a draft `message-send' can send."
+  ;; org-msg's mode derives from `org-mode', yet sends via `message-send'.
+  (unless (derived-mode-p 'message-mode 'org-msg-edit-mode)
+    (user-error "Not in a message buffer")))
+
 ;;;###autoload
 (defun mu4e-send-later (time)
   "Send the current draft at TIME instead of now.
 TIME is a Unix time in seconds; interactively it is read with
 `org-read-date' and confirmed."
   (interactive (progn
-                 (unless (derived-mode-p 'message-mode)
-                   (user-error "Not in a message buffer"))
+                 (mu4e-send-later--check-draft)
                  (list (mu4e-send-later--read-time))))
-  (unless (derived-mode-p 'message-mode)
-    (user-error "Not in a message buffer"))
+  (mu4e-send-later--check-draft)
   (let ((send-function message-send-mail-function)
         (id nil))
     (unless (and (symbolp send-function) (fboundp send-function))
