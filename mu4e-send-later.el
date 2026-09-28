@@ -1043,6 +1043,15 @@ failed messages are reported."
   "Command the login job runs."
   (mu4e-send-later--command 'mu4e-send-later-batch-flush))
 
+(defun mu4e-send-later--systemd-login-unit-text ()
+  "Contents of the login unit file."
+  (concat "[Unit]\n"
+          "Description=Send mail that fell due while logged out (mu4e-send-later)\n\n"
+          "[Service]\nType=oneshot\n"
+          "ExecStart=" (mapconcat #'mu4e-send-later--systemd-quote
+                                  (mu4e-send-later--login-command) " ")
+          "\n\n[Install]\nWantedBy=default.target\n"))
+
 ;;;###autoload
 (defun mu4e-send-later-install-login-job ()
   "Send overdue mail at login too, not just when Emacs next starts.
@@ -1053,14 +1062,7 @@ Re-run this if the Emacs executable moves, e.g. after an upgrade."
      (let ((file (mu4e-send-later--systemd-login-file)))
        (make-directory (file-name-directory file) t)
        (let ((coding-system-for-write 'utf-8-unix))
-         (write-region
-          (concat "[Unit]\n"
-                  "Description=Send mail that fell due while logged out (mu4e-send-later)\n\n"
-                  "[Service]\nType=oneshot\n"
-                  "ExecStart=" (mapconcat #'mu4e-send-later--systemd-quote
-                                          (mu4e-send-later--login-command) " ")
-                  "\n\n[Install]\nWantedBy=default.target\n")
-          nil file nil 'silent))
+         (write-region (mu4e-send-later--systemd-login-unit-text) nil file nil 'silent))
        (mu4e-send-later--call "systemctl" "--user" "daemon-reload")
        (mu4e-send-later--call "systemctl" "--user" "enable" mu4e-send-later--systemd-login-unit)
        (message "Installed %s" file)))
@@ -1090,20 +1092,38 @@ Re-run this if the Emacs executable moves, e.g. after an upgrade."
       (message "Removed %s" (mu4e-send-later--launchd-plist-file label)))))
 
 (defun mu4e-send-later--check-login-job ()
-  "Warn if an installed login job points at an Emacs that no longer exists."
+  "Warn if an installed login job would run an Emacs or a library that moved.
+The library moves when the package is upgraded."
   (dolist (file (list (mu4e-send-later--systemd-login-file)
                       (mu4e-send-later--launchd-plist-file
                        (concat mu4e-send-later--launchd-prefix ".login"))))
     (when (file-exists-p file)
       (with-temp-buffer
         (insert-file-contents file)
-        (when (and (re-search-forward "\\(?:ExecStart=\"\\|<string>\\)\\([^\"<]+\\)" nil t)
-                   (not (file-executable-p (match-string 1))))
-          (display-warning
-           'mu4e-send-later
-           (format "The login job in %s runs %s, which no longer exists; run M-x mu4e-send-later-install-login-job again"
-                   file (match-string 1))
-           :error))))))
+        (let ((emacs (when (re-search-forward
+                            (concat "\\(?:ExecStart=\"\\|<key>ProgramArguments</key>"
+                                    "\\s-*<array>\\s-*<string>\\)\\([^\"<]+\\)")
+                            nil t)
+                       (match-string 1)))
+              (library (when (re-search-forward
+                              "\\(?:\"-L\" \"\\|<string>-L</string>\\s-*<string>\\)\\([^\"<]+\\)"
+                              nil t)
+                         (match-string 1)))
+              (current (ignore-errors (mu4e-send-later--library-dir))))
+          (when (and emacs (not (file-executable-p emacs)))
+            (display-warning
+             'mu4e-send-later
+             (format "The login job in %s runs %s, which no longer exists; run M-x mu4e-send-later-install-login-job again"
+                     file emacs)
+             :error))
+          (when (and library current
+                     (not (equal (file-name-as-directory library)
+                                 (file-name-as-directory current))))
+            (display-warning
+             'mu4e-send-later
+             (format "The login job in %s loads mu4e-send-later from %s, not from %s where it is now; run M-x mu4e-send-later-install-login-job again"
+                     file library current)
+             :error)))))))
 
 ;;;; mu4e
 

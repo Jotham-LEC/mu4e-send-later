@@ -703,6 +703,53 @@ Skips the test where org-msg isn't installed, except on CI."
           (should (equal booted (list (concat (mu4e-send-later--launchd-domain) "/" mine)))))
       (delete-directory agents t))))
 
+(defun msl-test--login-job-warnings (installed-from)
+  "Warnings about login jobs installed while loaded from INSTALLED-FROM.
+Both a systemd unit and a LaunchAgent are written, to temporary places."
+  (let* ((config (make-temp-file "msl-config-" t))
+         (agents (make-temp-file "msl-agents-" t))
+         (process-environment (cons (concat "XDG_CONFIG_HOME=" config) process-environment))
+         (library-dir (symbol-function 'mu4e-send-later--library-dir))
+         (warnings nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mu4e-send-later--launchd-agents-dir)
+                   (lambda () (file-name-as-directory agents)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (push message warnings))))
+          (cl-letf (((symbol-function 'mu4e-send-later--library-dir)
+                     (lambda () installed-from)))
+            (let ((file (mu4e-send-later--systemd-login-file))
+                  (label (concat mu4e-send-later--launchd-prefix ".login")))
+              (make-directory (file-name-directory file) t)
+              (write-region (mu4e-send-later--systemd-login-unit-text) nil file)
+              (write-region (mu4e-send-later--plist-xml label (mu4e-send-later--login-command))
+                            nil (mu4e-send-later--launchd-plist-file label))))
+          (should (equal (funcall library-dir) (mu4e-send-later--library-dir)))
+          (mu4e-send-later--check-login-job)
+          warnings)
+      (delete-directory config t)
+      (delete-directory agents t))))
+
+(ert-deftest msl-test-login-job-from-an-old-library-dir-is-reported ()
+  (let ((warnings (msl-test--login-job-warnings "/gone/mu4e-send-later-0.1/")))
+    (should (= (length warnings) 2))
+    (dolist (warning warnings)
+      (should (string-match-p "/gone/mu4e-send-later-0.1/" warning))
+      (should (string-match-p "mu4e-send-later-install-login-job" warning)))))
+
+;; Pending wake-ups name the library directory; after an upgrade they
+;; must be re-made, pointing at the new one.
+(ert-deftest msl-test-check-always-rearms ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600))))
+      (setq msl-test--armed nil)
+      (cl-letf (((symbol-function 'mu4e-send-later--check-login-job) #'ignore))
+        (mu4e-send-later-check))
+      (should (equal msl-test--armed (list (plist-get (mu4e-send-later--meta id) :due)))))))
+
+(ert-deftest msl-test-current-login-job-is-not-reported ()
+  (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
+
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
                  "\"/a b/c\\\"d%%e$$f\\\\g\"")))
