@@ -203,6 +203,21 @@ Skips the test where org-msg isn't installed, except on CI."
       (should-error (call-interactively #'mu4e-send-later) :type 'user-error))
     (should-not (mu4e-send-later--ids))))
 
+(ert-deftest msl-test-queue-is-private ()
+  (msl-test--with-queue
+    ;; A queue left world-readable by an older version, and a lax umask.
+    (set-file-modes mu4e-send-later-directory #o755)
+    (with-file-modes #o755
+      (let* ((id (car (msl-test--schedule 3600)))
+             (item (mu4e-send-later--item-dir id)))
+        (dolist (file (list (mu4e-send-later--dir) item
+                            (expand-file-name "message" item)
+                            (expand-file-name "draft" item)
+                            (expand-file-name "meta.eld" item)
+                            (mu4e-send-later--dir "config.eld")
+                            (mu4e-send-later--dir "log")))
+          (should (zerop (logand (file-modes file) #o077))))))))
+
 (ert-deftest msl-test-arm-failure-keeps-draft-and-queue-empty ()
   (msl-test--with-queue
     (setq msl-test--arm-error "no scheduler")

@@ -153,6 +153,14 @@ sync doesn't upload it."
   (let ((dir (file-name-as-directory (expand-file-name mu4e-send-later-directory))))
     (if parts (expand-file-name (string-join parts "/") dir) dir)))
 
+(defun mu4e-send-later--make-queue-dir ()
+  "Create the queue directory, readable only by you.
+An existing one is made private too, as older versions didn't."
+  (let ((dir (mu4e-send-later--dir)))
+    (with-file-modes #o700
+      (make-directory dir t))
+    (set-file-modes dir #o700)))
+
 (defun mu4e-send-later--write-data (file data)
   "Atomically replace FILE with the printed representation of DATA."
   (let ((tmp (concat file ".tmp"))
@@ -160,9 +168,10 @@ sync doesn't upload it."
         (print-level nil)
         (print-escape-newlines t)
         (coding-system-for-write 'utf-8-unix))
-    (with-temp-file tmp
-      (prin1 data (current-buffer))
-      (insert "\n"))
+    (with-file-modes #o700
+      (with-temp-file tmp
+        (prin1 data (current-buffer))
+        (insert "\n")))
     (rename-file tmp file t)))
 
 (defun mu4e-send-later--read-data (file)
@@ -237,7 +246,7 @@ It must be old, and if OWNER is a process on this host, not running."
   (let* ((lock (mu4e-send-later--lock-dir))
          (token (format "%d %s %06x" (emacs-pid) (system-name) (random #xffffff)))
          (deadline (+ (float-time) 60)))
-    (make-directory (mu4e-send-later--dir) t)
+    (mu4e-send-later--make-queue-dir)
     (while (condition-case nil
                (progn (make-directory lock) nil)
              (file-already-exists t))
@@ -270,8 +279,9 @@ It must be old, and if OWNER is a process on this host, not running."
   (let ((line (apply #'format format-string args)))
     (ignore-errors
       (let ((coding-system-for-write 'utf-8-unix))
-        (write-region (format "%s %s\n" (format-time-string "%F %T") line)
-                      nil (mu4e-send-later--dir "log") t 'silent)))
+        (with-file-modes #o700
+          (write-region (format "%s %s\n" (format-time-string "%F %T") line)
+                        nil (mu4e-send-later--dir "log") t 'silent))))
     (when noninteractive (message "mu4e-send-later: %s" line))))
 
 ;;;; Notifications
@@ -678,16 +688,17 @@ Called where `message-send-mail-function' would be.  Return the new ID."
                      :draft-file (plist-get mu4e-send-later--draft :file))))
     (mu4e-send-later--preflight backend send-function vars)
     (mu4e-send-later--with-lock
-      (make-directory tmp t)
-      (save-restriction
-        (widen)
-        (let ((coding-system-for-write
-               (if enable-multibyte-characters 'utf-8-unix 'no-conversion)))
-          (write-region nil nil (expand-file-name "message" tmp) nil 'silent)))
-      (when mu4e-send-later--draft
-        (let ((coding-system-for-write 'utf-8-unix))
-          (write-region (plist-get mu4e-send-later--draft :text) nil
-                        (expand-file-name "draft" tmp) nil 'silent)))
+      (with-file-modes #o700
+        (make-directory tmp t)
+        (save-restriction
+          (widen)
+          (let ((coding-system-for-write
+                 (if enable-multibyte-characters 'utf-8-unix 'no-conversion)))
+            (write-region nil nil (expand-file-name "message" tmp) nil 'silent)))
+        (when mu4e-send-later--draft
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region (plist-get mu4e-send-later--draft :text) nil
+                          (expand-file-name "draft" tmp) nil 'silent))))
       (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
       ;; The rename is what makes the item visible to a sender.
       (rename-file tmp (mu4e-send-later--item-dir id))
@@ -933,7 +944,7 @@ Schedule a retry, or once they are used up, mark it failed."
     (unless (or (string-empty-p program) (file-executable-p program))
       (message "mu4e-send-later: %s isn't executable" program)
       (kill-emacs 1))
-    (unless (and (ignore-errors (make-directory (mu4e-send-later--dir) t) t)
+    (unless (and (ignore-errors (mu4e-send-later--make-queue-dir) t)
                  (file-writable-p (mu4e-send-later--dir)))
       (message "mu4e-send-later: can't write %s" (mu4e-send-later--dir))
       (kill-emacs 1))
@@ -1216,7 +1227,7 @@ Does nothing unless mu4e is running."
 
 (defun mu4e-send-later--watch ()
   "Resync mu4e whenever the queue changes, as when a background send ends."
-  (make-directory (mu4e-send-later--dir) t)
+  (mu4e-send-later--make-queue-dir)
   (setq mu4e-send-later--watch
         (ignore-error file-notify-error
           (file-notify-add-watch (mu4e-send-later--dir) '(change)
