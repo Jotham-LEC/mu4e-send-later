@@ -4,7 +4,9 @@
 
 ;; Unit tests run against a fake `test' backend and a fake send
 ;; function.  The `:integration' tests arm real systemd timers and only
-;; run when MU4E_SEND_LATER_INTEGRATION=1.
+;; run when MU4E_SEND_LATER_INTEGRATION=1.  They use a queue of their
+;; own, and the timers are named after the queue, so they don't touch
+;; the timers of the queue you use.
 
 ;;; Code:
 
@@ -650,6 +652,57 @@ Skips the test where org-msg isn't installed, except on CI."
     (should (string-match-p "RunAtLoad"
                             (mu4e-send-later--plist-xml "a.b" '("/x/emacs"))))))
 
+(ert-deftest msl-test-wake-up-names-belong-to-their-queue ()
+  (let* ((names (lambda (dir)
+                  (let ((mu4e-send-later-directory dir))
+                    (list (mu4e-send-later--systemd-unit 1790000000)
+                          (mu4e-send-later--launchd-label 1790000000)))))
+         (mine (funcall names "/tmp/msl-a/"))
+         (theirs (funcall names "/tmp/msl-b/")))
+    (should (equal mine (funcall names "/tmp/msl-a")))
+    (should-not (equal (car mine) (car theirs)))
+    (should-not (equal (cadr mine) (cadr theirs)))
+    (should (string-match-p "\\`mu4e-send-later-[0-9a-f]+-1790000000\\'" (car mine)))))
+
+(ert-deftest msl-test-systemd-disarm-stops-only-this-queues-timers ()
+  (let ((mu4e-send-later-directory "/tmp/msl-a/")
+        (calls nil))
+    (cl-letf (((symbol-function 'mu4e-send-later--call)
+               (lambda (&rest args) (push args calls) "")))
+      (mu4e-send-later--backend-disarm 'systemd))
+    (should (equal calls
+                   (list (list "systemctl" "--user" "stop"
+                               (concat "mu4e-send-later-" (mu4e-send-later--queue-tag)
+                                       "-*.timer")))))
+    ;; The pattern matches this queue's units and no other's.
+    (let ((pattern (wildcard-to-regexp (car (last (car calls))))))
+      (should (string-match-p pattern (concat (mu4e-send-later--systemd-unit 1790000000) ".timer")))
+      (let ((mu4e-send-later-directory "/tmp/msl-b/"))
+        (should-not (string-match-p
+                     pattern (concat (mu4e-send-later--systemd-unit 1790000000) ".timer")))))))
+
+(ert-deftest msl-test-launchd-disarm-removes-only-this-queues-jobs ()
+  (let* ((agents (make-temp-file "msl-agents-" t))
+         (mu4e-send-later-directory "/tmp/msl-a/")
+         (mine (mu4e-send-later--launchd-label 1790000000))
+         (theirs (let ((mu4e-send-later-directory "/tmp/msl-b/"))
+                   (mu4e-send-later--launchd-label 1790000000)))
+         (login (concat mu4e-send-later--launchd-prefix ".login"))
+         (booted nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mu4e-send-later--launchd-agents-dir)
+                   (lambda () (file-name-as-directory agents)))
+                  ((symbol-function 'mu4e-send-later--call)
+                   (lambda (&rest args) (push (car (last args)) booted) "")))
+          (dolist (label (list mine theirs login))
+            (write-region "" nil (mu4e-send-later--launchd-plist-file label)))
+          (mu4e-send-later--backend-disarm 'launchd)
+          (should-not (file-exists-p (mu4e-send-later--launchd-plist-file mine)))
+          (should (file-exists-p (mu4e-send-later--launchd-plist-file theirs)))
+          (should (file-exists-p (mu4e-send-later--launchd-plist-file login)))
+          (should (equal booted (list (concat (mu4e-send-later--launchd-domain) "/" mine)))))
+      (delete-directory agents t))))
+
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
                  "\"/a b/c\\\"d%%e$$f\\\\g\"")))
@@ -892,7 +945,8 @@ file it removes."
   :tags '(:integration)
   (skip-unless (equal (getenv "MU4E_SEND_LATER_INTEGRATION") "1"))
   (skip-unless (mu4e-send-later--systemd-available-p))
-  (let* ((dir (make-temp-file "msl-int-" t))
+  (let* ((real-tag (mu4e-send-later--queue-tag))
+         (dir (make-temp-file "msl-int-" t))
          (mu4e-send-later-directory (expand-file-name "queue/" dir))
          (mu4e-send-later-backend 'systemd)
          (mu4e-send-later-mode t)
@@ -902,6 +956,8 @@ file it removes."
          (message-sendmail-extra-arguments '("--read-envelope-from"))
          (message-send-mail-function #'message-send-mail-with-sendmail)
          (message-interactive t))
+    ;; Its own queue, so arming and disarming leave your real timers be.
+    (should-not (equal (mu4e-send-later--queue-tag) real-tag))
     (unwind-protect
         (progn
           (with-temp-file sendmail

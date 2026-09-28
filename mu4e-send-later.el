@@ -380,9 +380,15 @@ Also logs it, so it isn't lost where no notification daemon runs."
 (cl-defgeneric mu4e-send-later--backend-run (backend command)
   "Run COMMAND synchronously the way BACKEND would; return its output.")
 
+(defun mu4e-send-later--queue-tag ()
+  "Short hash of the queue directory, naming the wake-ups that serve it.
+Disarming then only touches this queue's, not those of another queue,
+such as the one the integration test uses."
+  (substring (secure-hash 'sha1 (mu4e-send-later--dir)) 0 8))
+
 (defun mu4e-send-later--systemd-unit (time)
   "Name of the systemd units that fire at TIME."
-  (format "mu4e-send-later-%d" time))
+  (format "mu4e-send-later-%s-%d" (mu4e-send-later--queue-tag) time))
 
 ;; A fresh unit name per wake-up: re-arming happens from inside the
 ;; service the previous timer started, which can't be replaced while
@@ -399,7 +405,8 @@ Also logs it, so it isn't lost where no notification daemon runs."
 
 (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql systemd)))
   "Cancel every pending systemd user timer wake-up."
-  (mu4e-send-later--call "systemctl" "--user" "stop" "mu4e-send-later-*.timer"))
+  (mu4e-send-later--call "systemctl" "--user" "stop"
+                         (format "mu4e-send-later-%s-*.timer" (mu4e-send-later--queue-tag))))
 
 (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql systemd)) time)
   "Non-nil if a systemd user timer wake-up is set for TIME."
@@ -419,11 +426,15 @@ Also logs it, so it isn't lost where no notification daemon runs."
 
 (defun mu4e-send-later--launchd-label (time)
   "Label of the LaunchAgent that fires at TIME."
-  (format "%s.%d" mu4e-send-later--launchd-prefix time))
+  (format "%s.%s.%d" mu4e-send-later--launchd-prefix (mu4e-send-later--queue-tag) time))
+
+(defun mu4e-send-later--launchd-agents-dir ()
+  "Directory holding the user's LaunchAgents."
+  (expand-file-name "~/Library/LaunchAgents/"))
 
 (defun mu4e-send-later--launchd-plist-file (label)
   "Where the LaunchAgent LABEL lives."
-  (expand-file-name (concat label ".plist") "~/Library/LaunchAgents/"))
+  (expand-file-name (concat label ".plist") (mu4e-send-later--launchd-agents-dir)))
 
 (defun mu4e-send-later--launchd-domain ()
   "The launchd domain of the logged-in user."
@@ -482,9 +493,10 @@ Also logs it, so it isn't lost where no notification daemon runs."
 (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql launchd)))
   "Cancel every pending launchd job wake-up."
   (let ((self (getenv "XPC_SERVICE_NAME"))
-        (dir (expand-file-name "~/Library/LaunchAgents/")))
+        (dir (mu4e-send-later--launchd-agents-dir)))
     (dolist (file (and (file-directory-p dir)
                        (directory-files dir t (concat "\\`" (regexp-quote mu4e-send-later--launchd-prefix)
+                                                      "\\." (mu4e-send-later--queue-tag)
                                                       "\\.[0-9]+\\.plist\\'"))))
       (let ((label (file-name-base file)))
         (unless (equal label self)
