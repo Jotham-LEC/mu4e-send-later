@@ -3,7 +3,8 @@
 ;; Copyright (C) 2026 Jotham Lim
 
 ;; Author: Jotham Lim <jotham@cothink.ing>
-;; Version: 0.2.0
+;; Assisted-by: Claude:claude-opus-5-5
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: mail
 ;; URL: https://github.com/Jotham-LEC/mu4e-send-later
