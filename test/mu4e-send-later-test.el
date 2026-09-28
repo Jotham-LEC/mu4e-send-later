@@ -522,6 +522,49 @@ Skips the test where org-msg isn't installed, except on CI."
         (mu4e-send-later-check))
       (should flushed))))
 
+(defun msl-test--corrupt (id &optional contents)
+  "Replace the metadata of item ID with CONTENTS, a truncated plist by default."
+  (with-temp-file (expand-file-name "meta.eld" (mu4e-send-later--item-dir id))
+    (insert (or contents "(:format 1 :due 17"))))
+
+(ert-deftest msl-test-corrupt-metadata-does-not-block-the-queue ()
+  (msl-test--with-queue
+    (let ((bad (car (msl-test--schedule 3600 "Bad")))
+          (bad-too (car (msl-test--schedule 3600 "Also bad")))
+          (good (car (msl-test--schedule 3600 "Good"))))
+      (msl-test--make-due good)
+      (msl-test--corrupt bad)
+      (msl-test--corrupt bad-too "42")
+      (should (= 2 (mu4e-send-later--flush)))
+      (should (= (length msl-test--sent) 1))
+      (should (string-match-p "Subject: Good" (plist-get (car msl-test--sent) :text)))
+      ;; Kept for you to look at, and reported once each, loudly.
+      (should (equal (mu4e-send-later--ids) (sort (list bad bad-too) #'string<)))
+      (should (= (length msl-test--notified) 2))
+      (dolist (id (list bad bad-too))
+        (should (cl-some (lambda (n) (and (string-match-p id (nth 1 n)) (nth 2 n)))
+                         msl-test--notified)))
+      ;; The startup check and the list get past them too.
+      (setq msl-test--notified nil)
+      (cl-letf (((symbol-function 'mu4e-send-later--flush-async) #'ignore)
+                ((symbol-function 'display-warning) #'ignore))
+        (mu4e-send-later-check))
+      (should msl-test--notified)
+      (mu4e-send-later-list)
+      (unwind-protect
+          (with-current-buffer "*mu4e-send-later*"
+            (goto-char (point-min))
+            (should (search-forward "unreadable" nil t)))
+        (kill-buffer "*mu4e-send-later*")))))
+
+(ert-deftest msl-test-corrupt-metadata-does-not-stop-arming ()
+  (msl-test--with-queue
+    (let ((bad (car (msl-test--schedule 3600 "Bad")))
+          (good (car (msl-test--schedule 7200 "Good"))))
+      (msl-test--corrupt bad)
+      (should (equal (mu4e-send-later--next-wake)
+                     (plist-get (mu4e-send-later--meta good) :due))))))
+
 (ert-deftest msl-test-undefined-send-function-fails ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600))))

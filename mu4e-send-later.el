@@ -186,8 +186,33 @@ An existing one is made private too, as older versions didn't."
   (mu4e-send-later--dir id))
 
 (defun mu4e-send-later--meta (id)
-  "The metadata plist of queued item ID."
-  (mu4e-send-later--read-data (expand-file-name "meta.eld" (mu4e-send-later--item-dir id))))
+  "The metadata plist of queued item ID.
+Signal `file-missing' if it has gone, `mu4e-send-later-error' if it
+can't be read."
+  (let* ((file (expand-file-name "meta.eld" (mu4e-send-later--item-dir id)))
+         (meta (condition-case err
+                   (mu4e-send-later--read-data file)
+                 (file-missing (signal (car err) (cdr err)))
+                 (error (signal 'mu4e-send-later-error
+                                (list "Unreadable metadata" file (error-message-string err)))))))
+    (unless (and (plistp meta) (integerp (plist-get meta :due)))
+      (signal 'mu4e-send-later-error (list "Unreadable metadata" file)))
+    meta))
+
+(defun mu4e-send-later--checked-meta (id &optional report)
+  "The metadata of item ID, or nil if it can't be read.
+With REPORT, log and notify that it can't; either way the caller skips
+it, so one bad item doesn't hold up the others."
+  (condition-case err
+      (mu4e-send-later--meta id)
+    (mu4e-send-later-error
+     (when report
+       (mu4e-send-later--notify
+        "Scheduled mail unreadable"
+        (format "%s is left in the queue, not sent: %s. See M-x mu4e-send-later-list."
+                id (error-message-string err))
+        t))
+     nil)))
 
 (defun mu4e-send-later--set-meta (id meta)
   "Store META as the metadata of queued item ID."
@@ -561,7 +586,8 @@ such as the one the integration test uses."
 (defun mu4e-send-later--next-wake ()
   "Unix time at which the queue next needs running, or nil."
   (let ((times (delq nil (mapcar (lambda (id)
-                                   (mu4e-send-later--wake-time (mu4e-send-later--meta id)))
+                                   (mu4e-send-later--wake-time
+                                    (mu4e-send-later--checked-meta id)))
                                  (mu4e-send-later--ids)))))
     (when times
       ;; A calendar timer set in the past never fires.
@@ -882,9 +908,11 @@ Schedule a retry, or once they are used up, mark it failed."
     (mu4e-send-later--with-lock
       (dolist (id (mu4e-send-later--ids))
         (mu4e-send-later--touch-lock)
-        (let* ((meta (mu4e-send-later--meta id))
+        (let* ((meta (mu4e-send-later--checked-meta id t))
                (wake (mu4e-send-later--wake-time meta)))
-          (cond ((eq (plist-get meta :state) 'sending)
+          (cond ((not meta)
+                 (cl-incf failed))
+                ((eq (plist-get meta :state) 'sending)
                  (mu4e-send-later--mark-interrupted id meta)
                  (cl-incf failed))
                 ((and wake (<= wake (float-time)))
@@ -989,8 +1017,9 @@ Call ON-EXIT with the exit status when it finishes."
   (interactive)
   (let (overdue failed)
     (dolist (id (mu4e-send-later--ids))
-      (let ((meta (mu4e-send-later--meta id)))
+      (let ((meta (mu4e-send-later--checked-meta id t)))
         (pcase (plist-get meta :state)
+          ('nil)
           ('failed (push meta failed))
           ;; Only a flush, under the lock, can tell it was interrupted.
           ('sending (push meta overdue))
@@ -1195,8 +1224,8 @@ Does nothing unless mu4e is running."
             (remhash id mu4e-send-later--mirrored))))
       (dolist (id ids)
         (let ((file (expand-file-name (concat id ".send-later:2,S") dir)))
-          ;; Sent between listing the queue and here.
-          (ignore-error file-missing
+          ;; Sent between listing the queue and here, or unreadable.
+          (ignore-error (file-missing mu4e-send-later-error)
             (let ((due (plist-get (mu4e-send-later--meta id) :due)))
               (unless (and (file-exists-p file)
                            (eql due (gethash id mu4e-send-later--mirrored)))
@@ -1314,8 +1343,8 @@ Does nothing unless mu4e is running."
   "Unschedule the message at point, keeping a copy in cancelled/."
   (interactive)
   (let* ((id (mu4e-send-later--id-at-point))
-         (meta (mu4e-send-later--meta id)))
-    (when (yes-or-no-p (format "Cancel \"%s\"? " (plist-get meta :subject)))
+         (meta (mu4e-send-later--checked-meta id)))
+    (when (yes-or-no-p (format "Cancel \"%s\"? " (or (plist-get meta :subject) id)))
       (mu4e-send-later--unschedule id)
       (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id)))))
 
@@ -1386,22 +1415,27 @@ Schedule it again with `mu4e-send-later' once edited."
   (add-hook 'tabulated-list-revert-hook #'mu4e-send-later--list-refresh nil t)
   (tabulated-list-init-header))
 
+(defun mu4e-send-later--list-row (meta)
+  "The list's columns for an item described by META, nil if unreadable."
+  (if (not meta)
+      (vector "" (propertize "unreadable" 'face 'error) "" ""
+              "meta.eld can't be read; view or cancel it")
+    (vector (format-time-string "%a %F %H:%M" (plist-get meta :due))
+            (let ((state (symbol-name (plist-get meta :state))))
+              (if (eq (plist-get meta :state) 'failed)
+                  (propertize state 'face 'error)
+                (if (> (plist-get meta :attempts) 0)
+                    (format "retry %d" (plist-get meta :attempts))
+                  state)))
+            (or (plist-get meta :to) "")
+            (or (plist-get meta :subject) "")
+            (or (plist-get meta :last-error) ""))))
+
 (defun mu4e-send-later--list-refresh ()
   "Reload the queue into the list buffer."
   (setq tabulated-list-entries
         (mapcar (lambda (id)
-                  (let ((meta (mu4e-send-later--meta id)))
-                    (list id
-                          (vector (format-time-string "%a %F %H:%M" (plist-get meta :due))
-                                  (let ((state (symbol-name (plist-get meta :state))))
-                                    (if (eq (plist-get meta :state) 'failed)
-                                        (propertize state 'face 'error)
-                                      (if (> (plist-get meta :attempts) 0)
-                                          (format "retry %d" (plist-get meta :attempts))
-                                        state)))
-                                  (or (plist-get meta :to) "")
-                                  (or (plist-get meta :subject) "")
-                                  (or (plist-get meta :last-error) "")))))
+                  (list id (mu4e-send-later--list-row (mu4e-send-later--checked-meta id))))
                 (mu4e-send-later--ids))))
 
 ;;;###autoload
