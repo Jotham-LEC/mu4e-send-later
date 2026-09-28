@@ -1,17 +1,20 @@
 # mu4e-send-later
 
-Schedule an email in mu4e to go out later instead of now, whether you write it
-in plain `message-mode` or with org-msg. Scheduled mail shows up in mu4e, where
-you can read, edit, reschedule, send or cancel it.
+Emacs doesn't have to be running. I write an email in mu4e, say when it should
+go out, and close Emacs if I like: at that time a systemd user timer (GNU/Linux)
+or a launchd job (macOS) starts a background Emacs that sends it. Mail that fell
+due while the laptop was asleep goes out when it wakes.
 
-- **Emacs doesn't need to be running.** On GNU/Linux a systemd user timer does
-  the waking; on macOS a launchd job. Mail sent while the laptop was asleep goes
-  out on wake.
+It works whether you write in plain `message-mode` or with org-msg. Scheduled
+mail shows up in mu4e, where you can read, edit, reschedule, send or cancel it.
+
+<!-- Screenshot: the Scheduled bookmark in mu4e, with a message or two queued. -->
+
 - **Nothing polls.** One timer is set for the next due message and moved
   whenever the queue changes. An empty queue has no timer at all.
 - **It fails loudly.** You're only told "Scheduled" once the timer has been
   created *and* checked. Failed sends are retried, then kept and reported, never
-  dropped.
+  dropped. A message is sent at most once; if that's ever in doubt, you're told.
 
 ## Install
 
@@ -19,6 +22,21 @@ Not on MELPA yet. With `package-vc` (Emacs 29+):
 
 ```elisp
 (package-vc-install "https://github.com/Jotham-LEC/mu4e-send-later")
+```
+
+`use-package` with `:vc` (Emacs 30+):
+
+```elisp
+(use-package mu4e-send-later
+  :vc (:url "https://github.com/Jotham-LEC/mu4e-send-later" :rev :newest)
+  :config (mu4e-send-later-mode 1))
+```
+
+straight.el:
+
+```elisp
+(straight-use-package
+ '(mu4e-send-later :type git :host github :repo "Jotham-LEC/mu4e-send-later"))
 ```
 
 Doom Emacs (`packages.el`):
@@ -111,6 +129,13 @@ state of your interactive session.
 `mu4e-send-later-backend` defaults to `auto`, which picks the first that works.
 X11 or Wayland makes no difference.
 
+The background Emacs sends with whatever `message-send-mail-function` was when
+you scheduled. If that's message.el's default, it's worked out the way
+message.el would, from `send-mail-function`, and that is stored too. Out of the
+box `send-mail-function` is `sendmail-query-once`, which asks you how to send,
+and nobody's there to answer; so set it (to `smtpmail-send-it`, or
+`sendmail-send-it` for msmtp and friends) or set `message-send-mail-function`.
+
 For mu4e, each queued message is also copied into `mu4e-send-later-maildir`,
 dated when it is due, and added to mu's index; the copy is removed once the
 message is sent, edited or cancelled. Only your interactive Emacs touches that
@@ -125,7 +150,17 @@ At scheduling time, each of these is an error, and the draft stays open:
 - the Emacs executable the timer would run doesn't exist;
 - a trial run of the background Emacs, in the scheduler's own environment,
   can't find your send function or `sendmail-program`;
+- the send function would ask how to send (`sendmail-query-once`, see above);
+- the draft has an `X-Message-SMTP-Method` header, which makes message.el send
+  it right away through the method it names. That isn't supported yet; take the
+  header out to schedule it. `message-server-alist` is ignored while scheduling
+  for the same reason;
 - a setting it would need can't be stored.
+
+If a background send is under way, scheduling, rescheduling and cancelling wait
+up to 5 seconds for it, then say "A send is in progress" so you can try again.
+A message that can't be read is left in the queue and reported, and the rest
+are sent as usual.
 
 At send time a failure is recorded on the message and retried after 2, 5, 15 and
 60 minutes (`mu4e-send-later-retry-delays`), with a desktop notification on the
@@ -148,6 +183,8 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 
 ## Caveats
 
+- Delivery is at most once (see above). A crash at the wrong moment means a
+  message you have to check by hand, never one sent twice.
 - Anything that happens *on* send happens when you schedule: Fcc/sent-folder
   copies, deleting the draft, marking the parent as replied. (Gmail users with
   `mu4e-sent-messages-behavior` set to `delete` get the Sent copy at the real
@@ -164,22 +201,44 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 - The background Emacs has no access to secrets unlocked in your session. Most
   sendmail setups are fine, including msmtp with `passwordeval`. smtpmail with
   `~/.authinfo.gpg` needs gpg-agent to already have the passphrase cached.
-- On Nix, the running Emacs's store path can be garbage-collected after an
-  upgrade, taking pending timers' executable with it. The startup check will
-  tell you. Set `mu4e-send-later-emacs-program` to a path that survives
-  upgrades, and re-run `mu4e-send-later-install-login-job` after upgrading if you
-  use it.
-- launchd has minute resolution, so on macOS mail goes out up to a minute late.
-  **The launchd backend has not been tested on a Mac yet**; reports welcome.
+- Upgrades. Pending timers and the login job name the Emacs executable and the
+  directory this package was loaded from, and an upgrade can move either. The
+  startup check re-arms the timers each time Emacs starts, and warns if the
+  login job points somewhere stale; re-run `mu4e-send-later-install-login-job`
+  then. On Nix the running Emacs's store path can be garbage-collected after an
+  upgrade, so set `mu4e-send-later-emacs-program` to a path that survives it.
+- Timers are named after the queue directory since 0.3.0. systemd timers armed
+  by 0.2 keep their old names; they fire once, send whatever is due, and go
+  away. On macOS, 0.2's `com.github.jotham-lec.mu4e-send-later.<number>.plist`
+  files in `~/Library/LaunchAgents` are no longer cleaned up; delete them by
+  hand.
+- **The launchd backend has not been tested on a Mac yet**; reports welcome.
+  launchd has minute resolution, so on macOS mail goes out up to a minute late.
+
+## Alternatives
+
+What I looked at before writing this, and why it didn't fit:
+
+- **gnus-delay**, part of Gnus. Delayed messages wait in a Gnus group and go out
+  when Gnus next checks for news, so Gnus has to be running. Worth a look if you
+  read mail in Gnus.
+- **mu4e-send-delay** and **mu4e-delay**. They keep the message as a draft with
+  a header saying when to send, and a timer in Emacs sends it, so Emacs has to
+  be running at that time.
+- **Scheduled send on the server**: Gmail, Fastmail and Outlook all have it in
+  their web apps. It doesn't need your computer at all, but it isn't reachable
+  over SMTP, so you can't use it from mu4e.
+- **msmtpq**, msmtp's queue. It holds mail while you're offline and sends it
+  when you're back, which is a different problem: there's no send time.
 
 ## Development
 
 ```sh
 make compile   # byte-compile, warnings are errors
-make deps      # install org-msg from MELPA into .deps/, for its tests
+make deps      # install org-msg and package-lint from MELPA into .deps/
 make test      # unit tests, against a fake scheduler and a fake send function
-make integration   # real systemd timers and a fake sendmail (GNU/Linux)
-make lint      # checkdoc
+make integration   # real systemd timers, on a queue of its own, and a fake sendmail
+make lint      # checkdoc and package-lint; fails on any warning
 ```
 
 ## License
