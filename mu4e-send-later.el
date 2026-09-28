@@ -270,7 +270,8 @@ It must be old, and if OWNER is a process on this host, not running."
   "Call FN holding the queue lock."
   (let* ((lock (mu4e-send-later--lock-dir))
          (token (format "%d %s %06x" (emacs-pid) (system-name) (random #xffffff)))
-         (deadline (+ (float-time) 60)))
+         ;; A background sender can wait out a long send; you shouldn't.
+         (deadline (+ (float-time) (if noninteractive 60 5))))
     (mu4e-send-later--make-queue-dir)
     (while (condition-case nil
                (progn (make-directory lock) nil)
@@ -282,8 +283,10 @@ It must be old, and if OWNER is a process on this host, not running."
                    (equal owner (mu4e-send-later--lock-owner)))
           (ignore-errors (delete-directory lock t))))
       (when (> (float-time) deadline)
-        (signal 'mu4e-send-later-error
-                (list "The queue is locked by another sender" lock)))
+        (if noninteractive
+            (signal 'mu4e-send-later-error
+                    (list "The queue is locked by another sender" lock))
+          (user-error "A send is in progress; try again in a moment")))
       (sleep-for 0.2))
     (condition-case err
         (write-region (concat token "\n") nil (expand-file-name "owner" lock) nil 'silent)
@@ -1335,7 +1338,11 @@ Does nothing unless mu4e is running."
 (defun mu4e-send-later--update (id fn)
   "Under the lock, replace ID's metadata with FN applied to it, then re-arm."
   (mu4e-send-later--with-lock
-    (mu4e-send-later--set-meta id (funcall fn (mu4e-send-later--meta id)))
+    (mu4e-send-later--set-meta
+     id (funcall fn (condition-case nil
+                        (mu4e-send-later--meta id)
+                      (file-missing
+                       (user-error "That message was already sent, or cancelled")))))
     (mu4e-send-later--arm))
   (mu4e-send-later--changed))
 

@@ -643,6 +643,32 @@ Skips the test where org-msg isn't installed, except on CI."
         (msl-test--hold-lock msl-test--dead-pid (system-name)))
       (should (file-exists-p (expand-file-name "owner" lock))))))
 
+(ert-deftest msl-test-interactive-lock-wait-is-short-and-says-why ()
+  (msl-test--with-queue
+    (msl-test--hold-lock (emacs-pid) (system-name))
+    (let ((noninteractive nil)
+          (start (float-time))
+          (waited nil))
+      (cl-letf (((symbol-function 'sleep-for) (lambda (&rest _) (setq waited t))))
+        (let ((err (should-error
+                    (cl-letf (((symbol-function 'float-time)
+                               (lambda (&rest _) (cl-incf start 1))))
+                      (mu4e-send-later--with-lock t))
+                    :type 'user-error)))
+          (should (string-match-p "in progress" (cadr err)))))
+      (should waited)
+      ;; Given up after about 5 seconds of the stubbed clock, not 60.
+      (should (< (- start (float-time)) 10)))))
+
+(ert-deftest msl-test-reschedule-after-sending-says-so ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600))))
+      (delete-directory (mu4e-send-later--item-dir id) t)
+      (should (string-match-p
+               "already sent"
+               (cadr (should-error (mu4e-send-later--update id #'identity)
+                                   :type 'user-error)))))))
+
 (ert-deftest msl-test-flush-keeps-the-lock-fresh ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600)))
