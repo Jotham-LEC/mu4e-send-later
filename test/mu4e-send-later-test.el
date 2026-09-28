@@ -1030,6 +1030,30 @@ file it removes."
               (should-not mu4e-send-later--watch))
           (mu4e-send-later-mode -1))))))
 
+(ert-deftest msl-test-mode-off-undoes-startup-and-pending-sync ()
+  (msl-test--with-queue
+    (let ((after-init-time nil)
+          (after-init-hook nil)
+          (mu4e-main-rendered-hook nil)
+          (mu4e-index-updated-hook nil)
+          (mu4e-send-later--watch nil)
+          (mu4e-send-later--sync-timer nil)
+          (mu4e-send-later-mode nil))
+      (unwind-protect
+          (progn
+            ;; Enabled from an init file, before startup finishes.
+            (mu4e-send-later-mode 1)
+            (should (memq #'mu4e-send-later-check after-init-hook))
+            (mu4e-send-later--queue-event (list 'd 'created (mu4e-send-later--dir "1790000000-abcdef")))
+            (let ((timer mu4e-send-later--sync-timer))
+              (should (memq timer timer-list))
+              (mu4e-send-later-mode -1)
+              (should-not (memq #'mu4e-send-later-check after-init-hook))
+              (should-not (memq timer timer-list))
+              (should-not mu4e-send-later--sync-timer)))
+        (mu4e-send-later-mode -1)
+        (when mu4e-send-later--sync-timer (cancel-timer mu4e-send-later--sync-timer))))))
+
 (ert-deftest msl-test-not-a-scheduled-message ()
   (msl-test--with-queue
     (msl-test--with-mu4e

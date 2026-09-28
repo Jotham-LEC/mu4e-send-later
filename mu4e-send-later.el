@@ -77,6 +77,7 @@
 
 (defvar mu4e-send-later-mode)
 (defvar send-mail-function)
+(defvar mu4e-send-later--sync-timer)
 
 ;;;; Customization
 
@@ -112,7 +113,7 @@ can disappear, as it can on Nix after the store is garbage-collected."
   "Seconds to wait before each retry of a failed send.
 Once these are used up the message is marked failed and left in the
 queue for you to retry or cancel from `mu4e-send-later-list'."
-  :type '(repeat integer))
+  :type '(repeat natnum))
 
 (defcustom mu4e-send-later-variables
   '(user-mail-address user-full-name mail-host-address
@@ -1017,6 +1018,7 @@ Call ON-EXIT with the exit status when it finishes."
       (funcall fn)
     (error (display-warning 'mu4e-send-later (error-message-string err) :error))))
 
+;;;###autoload
 (defun mu4e-send-later-check ()
   "Send overdue mail, re-arm the wake-up, and warn about failed messages."
   (interactive)
@@ -1059,6 +1061,10 @@ failed messages are reported."
   (mu4e-send-later--unwatch)
   (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
     (remove-hook hook #'mu4e-send-later--mu4e-sync-safely))
+  (remove-hook 'after-init-hook #'mu4e-send-later-check)
+  (when mu4e-send-later--sync-timer
+    (cancel-timer mu4e-send-later--sync-timer)
+    (setq mu4e-send-later--sync-timer nil))
   (when mu4e-send-later-mode
     (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
       (add-hook hook #'mu4e-send-later--mu4e-sync-safely))
@@ -1353,6 +1359,7 @@ Does nothing unless mu4e is running."
     (mu4e-send-later--arm))
   (mu4e-send-later--changed))
 
+;;;###autoload
 (defun mu4e-send-later-cancel ()
   "Unschedule the message at point, keeping a copy in cancelled/."
   (interactive)
@@ -1362,6 +1369,7 @@ Does nothing unless mu4e is running."
       (mu4e-send-later--unschedule id)
       (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id)))))
 
+;;;###autoload
 (defun mu4e-send-later-edit ()
   "Reopen the message at point as a draft, and unschedule it.
 Schedule it again with `mu4e-send-later' once edited."
@@ -1385,6 +1393,7 @@ Schedule it again with `mu4e-send-later' once edited."
       (message "Unscheduled; the original is in %s.  Schedule the draft again when you're done"
                (mu4e-send-later--dir "cancelled" id)))))
 
+;;;###autoload
 (defun mu4e-send-later-send-now ()
   "Send the message at point now, retrying it if it had failed."
   (interactive)
@@ -1398,6 +1407,7 @@ Schedule it again with `mu4e-send-later' once edited."
   (mu4e-send-later--flush-async)
   (message "Sending…"))
 
+;;;###autoload
 (defun mu4e-send-later-reschedule (time)
   "Move the message at point to TIME."
   (interactive (progn (mu4e-send-later--id-at-point)
