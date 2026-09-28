@@ -445,6 +445,66 @@ Skips the test where org-msg isn't installed, except on CI."
       (should (equal (mu4e-send-later--ids) (list id)))
       (should-not msl-test--armed))))
 
+(ert-deftest msl-test-item-is-marked-sending-while-it-sends ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600)))
+          (state nil))
+      (msl-test--make-due id)
+      (cl-letf* ((send (symbol-function 'mu4e-send-later--send))
+                 ((symbol-function 'mu4e-send-later--send)
+                  (lambda (id)
+                    (setq state (plist-get (mu4e-send-later--meta id) :state))
+                    (funcall send id))))
+        (should (zerop (mu4e-send-later--flush))))
+      (should (eq state 'sending)))))
+
+(ert-deftest msl-test-item-left-sending-is-never-resent ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Interrupted"))))
+      (msl-test--make-due id)
+      ;; As a sender that died mid-send leaves it.
+      (mu4e-send-later--set-meta id (plist-put (mu4e-send-later--meta id) :state 'sending))
+      (should (= 1 (mu4e-send-later--flush)))
+      (should-not msl-test--sent)
+      (let ((meta (mu4e-send-later--meta id)))
+        (should (eq (plist-get meta :state) 'failed))
+        (should (string-match-p "may have been sent" (plist-get meta :last-error))))
+      (should (= (length msl-test--notified) 1))
+      (should (string-match-p "may have been sent" (nth 1 (car msl-test--notified))))
+      (should (nth 2 (car msl-test--notified)))
+      ;; And stays put.
+      (should (zerop (mu4e-send-later--flush)))
+      (should-not msl-test--sent))))
+
+(ert-deftest msl-test-failed-cleanup-is-not-a-failed-send ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Sent once"))))
+      (msl-test--make-due id)
+      (cl-letf* ((delete (symbol-function 'delete-directory))
+                 ((symbol-function 'delete-directory)
+                  (lambda (dir &rest args)
+                    (if (equal (directory-file-name dir)
+                               (directory-file-name (mu4e-send-later--item-dir id)))
+                        (signal 'file-error (list "Can't delete" dir))
+                      (apply delete dir args)))))
+        (should (zerop (mu4e-send-later--flush)))
+        (should (= (length msl-test--sent) 1))
+        (should (zerop (plist-get (mu4e-send-later--meta id) :attempts)))
+        ;; Not sent a second time.
+        (mu4e-send-later--flush)
+        (should (= (length msl-test--sent) 1))
+        (should (eq (plist-get (mu4e-send-later--meta id) :state) 'failed))))))
+
+(ert-deftest msl-test-check-hands-an-interrupted-send-to-the-flush ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600)))
+          (flushed nil))
+      (mu4e-send-later--set-meta id (plist-put (mu4e-send-later--meta id) :state 'sending))
+      (cl-letf (((symbol-function 'mu4e-send-later--flush-async)
+                 (lambda (&rest _) (setq flushed t))))
+        (mu4e-send-later-check))
+      (should flushed))))
+
 (ert-deftest msl-test-undefined-send-function-fails ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600))))

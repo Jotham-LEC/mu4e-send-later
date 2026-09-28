@@ -786,38 +786,72 @@ SEPARATOR ends the headers."
           (mu4e-send-later--restamp-date mail-header-separator)
           (funcall send-function))))))
 
+(defun mu4e-send-later--record-failure (id meta err)
+  "Record that sending item ID, described by META, failed with ERR.
+Schedule a retry, or once they are used up, mark it failed."
+  (let* ((attempts (1+ (plist-get meta :attempts)))
+         (delay (nth (1- attempts) mu4e-send-later-retry-delays))
+         (reason (error-message-string err))
+         (subject (plist-get meta :subject)))
+    (setq meta (plist-put meta :attempts attempts))
+    (setq meta (plist-put meta :last-error reason))
+    (if delay
+        (setq meta (plist-put meta :next-attempt (+ (floor (float-time)) delay)))
+      (setq meta (plist-put meta :state 'failed)))
+    (mu4e-send-later--set-meta id meta)
+    (cond ((not delay)
+           (mu4e-send-later--notify
+            "Scheduled mail NOT sent"
+            (format "%s: gave up after %d attempts (%s). See M-x mu4e-send-later-list."
+                    subject attempts reason)
+            t))
+          ((= attempts 1)
+           (mu4e-send-later--notify
+            "Scheduled mail not sent yet"
+            (format "%s: %s. Retrying." subject reason) t))
+          (t (mu4e-send-later--log "retry %d of %s failed: %s" attempts id reason)))))
+
 (defun mu4e-send-later--attempt (id)
   "Try to send item ID; return non-nil on success."
-  (let ((meta (mu4e-send-later--meta id)))
-    (condition-case err
-        (progn
-          (mu4e-send-later--send id)
+  (let* ((meta (mu4e-send-later--meta id))
+         (sent (condition-case err
+                   (progn
+                     ;; Should we die mid-send, the next flush sees this
+                     ;; and doesn't send it again: at most once, loudly.
+                     (mu4e-send-later--set-meta
+                      id (plist-put (copy-sequence meta) :state 'sending))
+                     (mu4e-send-later--send id)
+                     t)
+                 (error (mu4e-send-later--record-failure id meta err)
+                        nil))))
+    (when sent
+      (mu4e-send-later--log "sent %s: %s" id (plist-get meta :subject))
+      ;; A failed cleanup mustn't count as a failed send, which would be
+      ;; retried.  Left marked `sending', the item is reported, not resent.
+      (condition-case err
           (delete-directory (mu4e-send-later--item-dir id) t)
-          (mu4e-send-later--log "sent %s: %s" id (plist-get meta :subject))
-          t)
-      (error
-       (let* ((attempts (1+ (plist-get meta :attempts)))
-              (delay (nth (1- attempts) mu4e-send-later-retry-delays))
-              (reason (error-message-string err))
-              (subject (plist-get meta :subject)))
-         (setq meta (plist-put meta :attempts attempts))
-         (setq meta (plist-put meta :last-error reason))
-         (if delay
-             (setq meta (plist-put meta :next-attempt (+ (floor (float-time)) delay)))
-           (setq meta (plist-put meta :state 'failed)))
-         (mu4e-send-later--set-meta id meta)
-         (cond ((not delay)
-                (mu4e-send-later--notify
-                 "Scheduled mail NOT sent"
-                 (format "%s: gave up after %d attempts (%s). See M-x mu4e-send-later-list."
-                         subject attempts reason)
-                 t))
-               ((= attempts 1)
-                (mu4e-send-later--notify
-                 "Scheduled mail not sent yet"
-                 (format "%s: %s. Retrying." subject reason) t))
-               (t (mu4e-send-later--log "retry %d of %s failed: %s" attempts id reason)))
-         nil)))))
+        (error
+         (mu4e-send-later--notify
+          "Scheduled mail sent, but still queued"
+          (format "%s was sent, but couldn't be taken out of the queue: %s"
+                  (plist-get meta :subject) (error-message-string err)))))
+      t)))
+
+(defconst mu4e-send-later--interrupted-error
+  "Interrupted while sending: it may have been sent, please check before sending it again"
+  "Last error of an item a sender stopped in the middle of sending.")
+
+(defun mu4e-send-later--mark-interrupted (id meta)
+  "Mark item ID, described by META and left `sending', as failed, and say so."
+  (mu4e-send-later--set-meta
+   id (thread-first meta
+                    (plist-put :state 'failed)
+                    (plist-put :last-error mu4e-send-later--interrupted-error)))
+  (mu4e-send-later--notify
+   "Scheduled mail may have been sent"
+   (format "%s: %s. See M-x mu4e-send-later-list."
+           (plist-get meta :subject) mu4e-send-later--interrupted-error)
+   t))
 
 (defun mu4e-send-later--flush ()
   "Send every due message, then re-arm.  Return the number that failed."
@@ -825,10 +859,14 @@ SEPARATOR ends the headers."
     (mu4e-send-later--with-lock
       (dolist (id (mu4e-send-later--ids))
         (mu4e-send-later--touch-lock)
-        (let ((wake (mu4e-send-later--wake-time (mu4e-send-later--meta id))))
-          (when (and wake (<= wake (float-time)))
-            (unless (mu4e-send-later--attempt id)
-              (cl-incf failed)))))
+        (let* ((meta (mu4e-send-later--meta id))
+               (wake (mu4e-send-later--wake-time meta)))
+          (cond ((eq (plist-get meta :state) 'sending)
+                 (mu4e-send-later--mark-interrupted id meta)
+                 (cl-incf failed))
+                ((and wake (<= wake (float-time)))
+                 (unless (mu4e-send-later--attempt id)
+                   (cl-incf failed))))))
       ;; The emacs backend's timer lives in the interactive Emacs, which
       ;; re-arms when this process exits.
       (unless (and noninteractive (eq (mu4e-send-later--backend) 'emacs))
@@ -931,6 +969,8 @@ Call ON-EXIT with the exit status when it finishes."
       (let ((meta (mu4e-send-later--meta id)))
         (pcase (plist-get meta :state)
           ('failed (push meta failed))
+          ;; Only a flush, under the lock, can tell it was interrupted.
+          ('sending (push meta overdue))
           (_ (when (<= (mu4e-send-later--wake-time meta) (float-time))
                (push meta overdue))))))
     (when failed

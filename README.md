@@ -134,6 +134,14 @@ urgent notification, and it stays in the queue until you retry or cancel it.
 Each time Emacs starts, `mu4e-send-later-mode` warns about failed messages. That
 also catches the case where the timer never fired at all.
 
+Delivery is at most once, and loud about it. A message is marked `sending`
+just before it's handed to your send function. If the sender dies right then
+(a crash, a power cut), there's no way to know whether the mail server already
+took it, so it is never sent again on its own. The next run marks it failed
+with "may have been sent, please check", with an urgent notification. I'd
+rather tell you than send it twice. Look in your Sent folder or ask the
+recipient, then `send-now` or `cancel` it.
+
 Errors are signalled as `mu4e-send-later-backend-error` or
 `mu4e-send-later-send-error`, both children of `mu4e-send-later-error`.
 Everything is logged to `~/.local/state/mu4e-send-later/log`.
