@@ -834,6 +834,23 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
 (ert-deftest msl-test-current-login-job-is-not-reported ()
   (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
 
+(ert-deftest msl-test-launchd-load-never-boots-out-the-running-job ()
+  (let* ((agents (make-temp-file "msl-agents-" t))
+         (label (mu4e-send-later--launchd-label 1790000000))
+         (process-environment (cons (concat "XPC_SERVICE_NAME=" label) process-environment))
+         (calls nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mu4e-send-later--launchd-agents-dir)
+                   (lambda () (file-name-as-directory agents)))
+                  ((symbol-function 'mu4e-send-later--call)
+                   (lambda (&rest args) (push (nth 1 args) calls) "")))
+          (mu4e-send-later--launchd-load label "<plist/>")
+          (should (equal calls '("bootstrap")))
+          (setq calls nil)
+          (mu4e-send-later--launchd-load (concat label "0") "<plist/>")
+          (should (equal calls '("bootstrap" "bootout"))))
+      (delete-directory agents t))))
+
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
                  "\"/a b/c\\\"d%%e$$f\\\\g\"")))

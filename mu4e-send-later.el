@@ -514,9 +514,11 @@ such as the one the integration test uses."
     (make-directory (file-name-directory file) t)
     (let ((coding-system-for-write 'utf-8-unix))
       (write-region xml nil file nil 'silent))
-    (ignore-errors
-      (mu4e-send-later--call "launchctl" "bootout"
-                             (concat (mu4e-send-later--launchd-domain) "/" label)))
+    ;; As in disarming, booting out the job running us would kill us.
+    (unless (equal label (getenv "XPC_SERVICE_NAME"))
+      (ignore-errors
+        (mu4e-send-later--call "launchctl" "bootout"
+                               (concat (mu4e-send-later--launchd-domain) "/" label))))
     (mu4e-send-later--call "launchctl" "bootstrap" (mu4e-send-later--launchd-domain) file)))
 
 (cl-defmethod mu4e-send-later--backend-arm ((_ (eql launchd)) time)
