@@ -957,6 +957,30 @@ file it removes."
         (should (equal msl-test--mu (list (list 'remove (msl-test--mirror sent)))))
         (should (file-exists-p (msl-test--mirror kept)))))))
 
+(ert-deftest msl-test-mu4e-mirror-renamed-by-mu4e-is-not-duplicated ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((result (msl-test--schedule 3600 "Flagged"))
+             (id (car result))
+             (flagged (replace-regexp-in-string ":2,S\\'" ":2,FS" (msl-test--mirror id)))
+             (later (+ (floor (float-time)) 7200)))
+        (kill-buffer (cdr result))
+        ;; Flagging it in mu4e renames the file.
+        (rename-file (msl-test--mirror id) flagged)
+        (setq msl-test--mu nil)
+        (mu4e-send-later--mu4e-sync)
+        (should-not msl-test--mu)
+        (should (equal (directory-files (file-name-directory flagged) nil "send-later")
+                       (list (file-name-nondirectory flagged))))
+        ;; Rescheduled, the copy mu4e has is the one brought up to date.
+        (mu4e-send-later--update id (lambda (meta) (plist-put meta :due later)))
+        (should (equal msl-test--mu (list (list 'add flagged))))
+        (should (equal (directory-files (file-name-directory flagged) nil "send-later")
+                       (list (file-name-nondirectory flagged))))
+        (with-temp-buffer
+          (insert-file-contents-literally flagged)
+          (should (search-forward (message-make-date later) nil t)))))))
+
 (ert-deftest msl-test-queue-event-resyncs-only-for-items ()
   (let ((mu4e-send-later--sync-timer nil))
     (unwind-protect

@@ -1218,15 +1218,20 @@ Does nothing unless mu4e is running."
   (when-let* ((dir (mu4e-send-later--mirror-dir)))
     (dolist (sub '("cur" "new" "tmp"))
       (make-directory (expand-file-name (concat "../" sub) dir) t))
-    (let ((ids (mu4e-send-later--ids)))
+    (let ((ids (mu4e-send-later--ids))
+          (mirrors (make-hash-table :test #'equal)))
+      ;; By ID, not by name: mu4e renames the file when its flags change.
       (dolist (file (directory-files dir t "\\.send-later:2,"))
         (let ((id (mu4e-send-later--mirror-id file)))
-          (unless (member id ids)
-            ;; mu deletes the file as well.
+          (if (and (member id ids) (not (gethash id mirrors)))
+              (puthash id file mirrors)
+            ;; Gone from the queue, or a second copy.  mu deletes the file.
             (mu4e--server-remove file)
-            (remhash id mu4e-send-later--mirrored))))
+            (unless (member id ids)
+              (remhash id mu4e-send-later--mirrored)))))
       (dolist (id ids)
-        (let ((file (expand-file-name (concat id ".send-later:2,S") dir)))
+        (let ((file (or (gethash id mirrors)
+                        (expand-file-name (concat id ".send-later:2,S") dir))))
           ;; Sent between listing the queue and here, or unreadable.
           (ignore-error (file-missing mu4e-send-later-error)
             (let ((due (plist-get (mu4e-send-later--meta id) :due)))

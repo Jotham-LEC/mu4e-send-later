@@ -152,6 +152,9 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
   copies, deleting the draft, marking the parent as replied. (Gmail users with
   `mu4e-sent-messages-behavior` set to `delete` get the Sent copy at the real
   send time, from Gmail.)
+- The copy in the Scheduled maildir is only a view. Deleting or moving it in
+  mu4e doesn't cancel the send, and it comes back on the next sync. Use
+  `mu4e-send-later-cancel` on it instead. Flagging or marking it read is fine.
 - mu4e shows each change straight away, but a newly scheduled message only
   appears in a Scheduled list that is already open once you refresh it (`g`).
 - Messages scheduled before the draft was kept (before 2026-09-28) can't be
