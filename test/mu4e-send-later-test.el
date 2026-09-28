@@ -975,6 +975,51 @@ file it removes."
             (should (search-forward "Subject: Org plans\n\n:PROPERTIES:" nil t))
             (should (search-forward "This is *bold*." nil t))))))))
 
+(defun msl-test--edit-in-list (subject)
+  "Call `mu4e-send-later-edit' on SUBJECT in the list."
+  (mu4e-send-later-list)
+  (unwind-protect
+      (with-current-buffer "*mu4e-send-later*"
+        (goto-char (point-min))
+        (search-forward subject)
+        (mu4e-send-later-edit))
+    (kill-buffer "*mu4e-send-later*")))
+
+(ert-deftest msl-test-edit-that-cannot-open-the-draft-keeps-it-scheduled ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Unopenable"))))
+      (cl-letf (((symbol-function 'mu4e-send-later--open-draft)
+                 (lambda (&rest _) (error "No room for a draft"))))
+        (should-error (msl-test--edit-in-list "Unopenable")))
+      (should (equal (mu4e-send-later--ids) (list id)))
+      (should msl-test--armed))))
+
+(ert-deftest msl-test-edit-that-cannot-unschedule-says-so ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Stuck")))
+          (opened nil))
+      (cl-letf (((symbol-function 'mu4e-send-later--open-draft)
+                 (lambda (&rest _) (setq opened t)))
+                ((symbol-function 'mu4e-send-later--unschedule)
+                 (lambda (_) (error "Disk full"))))
+        (should (string-match-p
+                 "still scheduled"
+                 (error-message-string (should-error (msl-test--edit-in-list "Stuck"))))))
+      (should opened)
+      (should (equal (mu4e-send-later--ids) (list id))))))
+
+(ert-deftest msl-test-edit-says-where-the-original-went ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Kept")))
+          (said nil))
+      (cl-letf (((symbol-function 'mu4e-send-later--open-draft) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (when format (push (apply #'format-message format args) said)))))
+        (msl-test--edit-in-list "Kept"))
+      (should (string-match-p (regexp-quote (mu4e-send-later--dir "cancelled" id))
+                              (car said))))))
+
 (ert-deftest msl-test-edit-needs-a-kept-draft ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600))))

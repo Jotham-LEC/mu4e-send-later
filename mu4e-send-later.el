@@ -1309,7 +1309,7 @@ Does nothing unless mu4e is running."
       (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id)))))
 
 (defun mu4e-send-later-edit ()
-  "Unschedule the message at point and reopen it as a draft.
+  "Reopen the message at point as a draft, and unschedule it.
 Schedule it again with `mu4e-send-later' once edited."
   (interactive)
   (let* ((id (mu4e-send-later--id-at-point))
@@ -1321,9 +1321,15 @@ Schedule it again with `mu4e-send-later' once edited."
                   (let ((coding-system-for-read 'utf-8-unix))
                     (insert-file-contents file))
                   (buffer-string))))
-      (mu4e-send-later--unschedule id)
+      ;; Draft first: if it can't be opened, nothing has changed.
       (mu4e-send-later--open-draft text meta)
-      (message "Unscheduled; schedule it again when you're done"))))
+      (condition-case err
+          (mu4e-send-later--unschedule id)
+        (error
+         (error "Opened the draft, but the original is still scheduled (%s); cancel it before sending the draft"
+                (error-message-string err))))
+      (message "Unscheduled; the original is in %s.  Schedule the draft again when you're done"
+               (mu4e-send-later--dir "cancelled" id)))))
 
 (defun mu4e-send-later-send-now ()
   "Send the message at point now, retrying it if it had failed."
