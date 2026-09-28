@@ -76,6 +76,7 @@
 (declare-function mu4e--delimit-headers "ext:mu4e-draft" (&optional undelimit))
 
 (defvar mu4e-send-later-mode)
+(defvar send-mail-function)
 
 ;;;; Customization
 
@@ -121,7 +122,7 @@ queue for you to retry or cancel from `mu4e-send-later-list'."
     smtpmail-smtp-server smtpmail-smtp-service smtpmail-smtp-user
     smtpmail-stream-type smtpmail-local-domain smtpmail-sendto-domain
     smtpmail-servers-requiring-authorization smtpmail-smtp-extra-args
-    smtpmail-retries auth-sources)
+    smtpmail-retries auth-sources send-mail-function)
   "Variables whose values at scheduling time are used when sending.
 The background Emacs doesn't load your init file, so anything your
 `message-send-mail-function' reads must be listed here."
@@ -563,10 +564,27 @@ A plist of :text, :mode and :file, the file it was saved as.")
     (let ((value (message-fetch-field name)))
       (if value (rfc2047-decode-string value) ""))))
 
+(defun mu4e-send-later--effective-send-function (send-function)
+  "The function SEND-FUNCTION sends with once `send-mail-function' is read.
+Resolves message.el's default the way it resolves itself."
+  (require 'sendmail)
+  (if (eq send-function 'message--default-send-mail-function)
+      (message-default-send-mail-function)
+    send-function))
+
+(defun mu4e-send-later--send-function-problem (send-function)
+  "Why SEND-FUNCTION can't send from a background Emacs, or nil if it can.
+SEND-FUNCTION is resolved with `mu4e-send-later--effective-send-function'."
+  (when (or (eq send-function 'sendmail-query-once)
+            (and (eq send-function 'message-use-send-mail-function)
+                 (eq send-mail-function 'sendmail-query-once)))
+    "`send-mail-function' is `sendmail-query-once', which asks how to send and so can't send in the background; set `send-mail-function' (e.g. to `smtpmail-send-it' or `sendmail-send-it')"))
+
 (defun mu4e-send-later--preflight (backend send-function vars)
   "Check the background sender can send with SEND-FUNCTION and VARS on BACKEND."
   (let ((key (list backend (mu4e-send-later--emacs) send-function
-                   (alist-get 'sendmail-program vars))))
+                   (alist-get 'sendmail-program vars)
+                   (alist-get 'send-mail-function vars))))
     (unless (member key mu4e-send-later--preflight-ok)
       (let ((output (condition-case err
                         (mu4e-send-later--backend-run
@@ -574,7 +592,8 @@ A plist of :text, :mode and :file, the file it was saved as.")
                          (mu4e-send-later--command
                           'mu4e-send-later-batch-preflight
                           (symbol-name send-function)
-                          (or (alist-get 'sendmail-program vars) "")))
+                          (or (alist-get 'sendmail-program vars) "")
+                          (format "%s" (or (alist-get 'send-mail-function vars) ""))))
                       (mu4e-send-later-error
                        (signal 'mu4e-send-later-backend-error
                                (list "The background sender failed its preflight check"
@@ -664,6 +683,9 @@ TIME is a Unix time in seconds; interactively it is read with
     (unless (and (symbolp send-function) (fboundp send-function))
       (signal 'mu4e-send-later-error
               (list "`message-send-mail-function' must name a function" send-function)))
+    (setq send-function (mu4e-send-later--effective-send-function send-function))
+    (when-let* ((problem (mu4e-send-later--send-function-problem send-function)))
+      (user-error "Can't schedule: %s" problem))
     (when (and (derived-mode-p 'org-msg-edit-mode) (fboundp 'org-msg-sanity-check))
       (org-msg-sanity-check))
     (let ((message-send-mail-function
@@ -795,12 +817,21 @@ SEPARATOR ends the headers."
 (defun mu4e-send-later-batch-preflight ()
   "Check a background Emacs could send; run by `mu4e-send-later'."
   (mu4e-send-later--batch-setup)
-  (let ((send-function (intern (pop command-line-args-left)))
-        (program (pop command-line-args-left)))
-    (require 'sendmail)
-    (require 'smtpmail nil t)
+  (require 'sendmail)
+  (require 'smtpmail nil t)
+  (let* ((send-function (intern (pop command-line-args-left)))
+         (program (pop command-line-args-left))
+         (send-mail-function-name (pop command-line-args-left))
+         (send-mail-function (if (member send-mail-function-name '(nil ""))
+                                 send-mail-function
+                               (intern send-mail-function-name)))
+         (problem (mu4e-send-later--send-function-problem
+                   (mu4e-send-later--effective-send-function send-function))))
     (unless (fboundp send-function)
       (message "mu4e-send-later: `%s' isn't defined without your init file" send-function)
+      (kill-emacs 1))
+    (when problem
+      (message "mu4e-send-later: %s" problem)
       (kill-emacs 1))
     (unless (or (string-empty-p program) (file-executable-p program))
       (message "mu4e-send-later: %s isn't executable" program)

@@ -246,6 +246,76 @@ Skips the test where org-msg isn't installed, except on CI."
                           :type 'mu4e-send-later-error))
         (kill-buffer buffer)))))
 
+(defun msl-test--default-variables ()
+  "The standard value of `mu4e-send-later-variables'."
+  (eval (car (get 'mu4e-send-later-variables 'standard-value)) t))
+
+(ert-deftest msl-test-default-send-function-with-smtpmail-is-resolved ()
+  (msl-test--with-queue
+    (let ((mu4e-send-later-variables (msl-test--default-variables))
+          (send-mail-function #'smtpmail-send-it)
+          (buffer (msl-test--draft)))
+      (unwind-protect
+          (let* ((id (with-current-buffer buffer
+                       (setq-local message-send-mail-function
+                                   #'message--default-send-mail-function)
+                       (mu4e-send-later (+ (floor (float-time)) 3600))))
+                 (meta (mu4e-send-later--meta id)))
+            ;; What message.el would call at send time, not its dispatcher.
+            (should (eq (plist-get meta :send-function) 'message-use-send-mail-function))
+            ;; Which reads `send-mail-function' again when it sends.
+            (should (eq (alist-get 'send-mail-function (plist-get meta :variables))
+                        'smtpmail-send-it)))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest msl-test-send-mail-function-is-used-at-send-time ()
+  (msl-test--with-queue
+    (let* ((mu4e-send-later-variables '(send-mail-function msl-test-setting))
+           (id (let ((send-mail-function #'msl-test-send)
+                     (buffer (msl-test--draft)))
+                 (with-current-buffer buffer
+                   (setq-local message-send-mail-function
+                               #'message--default-send-mail-function)
+                   (mu4e-send-later (+ (floor (float-time)) 3600))))))
+      (msl-test--make-due id)
+      ;; As in `emacs -Q --batch', where nothing is configured.
+      (let ((send-mail-function #'sendmail-query-once))
+        (should (zerop (mu4e-send-later--flush))))
+      (should (= (length msl-test--sent) 1)))))
+
+(ert-deftest msl-test-unconfigured-send-mail-function-is-refused ()
+  (msl-test--with-queue
+    (dolist (setup '((message--default-send-mail-function . sendmail-query-once)
+                     (message-use-send-mail-function . sendmail-query-once)
+                     (sendmail-query-once . smtpmail-send-it)))
+      (let ((send-mail-function (cdr setup))
+            (buffer (msl-test--draft)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (setq-local message-send-mail-function (car setup))
+              (should (string-match-p
+                       "send-mail-function"
+                       (cadr (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                                           :type 'user-error))))
+              (should (buffer-live-p buffer)))
+          (kill-buffer buffer))))
+    (should-not (mu4e-send-later--ids))))
+
+(ert-deftest msl-test-preflight-fails-on-an-unconfigured-send-function ()
+  (msl-test--with-queue
+    (dolist (send-function '("message--default-send-mail-function" "sendmail-query-once"))
+      (should-error
+       (mu4e-send-later--backend-run
+        'emacs (mu4e-send-later--command 'mu4e-send-later-batch-preflight send-function ""))
+       :type 'mu4e-send-later-backend-error))
+    ;; The same function passes once told what `send-mail-function' is.
+    (should (string-match-p
+             "preflight ok"
+             (mu4e-send-later--backend-run
+              'emacs (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                               "message--default-send-mail-function" ""
+                                               "smtpmail-send-it"))))))
+
 (ert-deftest msl-test-sendmail-program-is-made-absolute ()
   (msl-test--with-queue
     (let ((mu4e-send-later-variables '(sendmail-program))
