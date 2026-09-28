@@ -200,24 +200,65 @@ sync doesn't upload it."
   (when (eq (plist-get meta :state) 'pending)
     (or (plist-get meta :next-attempt) (plist-get meta :due))))
 
+(defconst mu4e-send-later--lock-stale-after 900
+  "Seconds after which a lock whose owner can't be seen alive is broken.")
+
+(defun mu4e-send-later--lock-dir ()
+  "The directory whose existence is the queue lock."
+  (mu4e-send-later--dir ".lock"))
+
+(defun mu4e-send-later--lock-owner ()
+  "Contents of the lock's owner file, or nil if there is none."
+  (ignore-errors
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name "owner" (mu4e-send-later--lock-dir)))
+      (string-trim (buffer-string)))))
+
+(defun mu4e-send-later--lock-stale-p (owner)
+  "Non-nil if the lock, held by OWNER, was left behind by a dead sender.
+It must be old, and if OWNER is a process on this host, not running."
+  (let ((mtime (file-attribute-modification-time
+                (file-attributes (mu4e-send-later--lock-dir)))))
+    (and mtime
+         (> (float-time (time-since mtime)) mu4e-send-later--lock-stale-after)
+         (pcase (and owner (split-string owner " "))
+           (`(,pid ,host . ,_)
+            (not (and (equal host (system-name))
+                      (process-attributes (string-to-number pid)))))
+           ;; No owner to ask, as with a lock from before owners were written.
+           (_ t)))))
+
+(defun mu4e-send-later--touch-lock ()
+  "Show the lock is still in use, so it isn't taken for stale."
+  (ignore-errors (set-file-times (mu4e-send-later--lock-dir))))
+
 (defun mu4e-send-later--call-with-lock (fn)
   "Call FN holding the queue lock."
-  (let* ((lock (mu4e-send-later--dir ".lock"))
+  (let* ((lock (mu4e-send-later--lock-dir))
+         (token (format "%d %s %06x" (emacs-pid) (system-name) (random #xffffff)))
          (deadline (+ (float-time) 60)))
     (make-directory (mu4e-send-later--dir) t)
     (while (condition-case nil
                (progn (make-directory lock) nil)
              (file-already-exists t))
       ;; A sender that died mid-flush leaves its lock behind.
-      (let ((mtime (file-attribute-modification-time (file-attributes lock))))
-        (when (and mtime (> (float-time (time-since mtime)) 900))
-          (delete-directory lock)))
+      (let ((owner (mu4e-send-later--lock-owner)))
+        (when (and (mu4e-send-later--lock-stale-p owner)
+                   ;; Unless someone else broke it and took it meanwhile.
+                   (equal owner (mu4e-send-later--lock-owner)))
+          (ignore-errors (delete-directory lock t))))
       (when (> (float-time) deadline)
         (signal 'mu4e-send-later-error
                 (list "The queue is locked by another sender" lock)))
       (sleep-for 0.2))
+    (condition-case err
+        (write-region (concat token "\n") nil (expand-file-name "owner" lock) nil 'silent)
+      (error (ignore-errors (delete-directory lock t))
+             (signal (car err) (cdr err))))
     (unwind-protect (funcall fn)
-      (ignore-errors (delete-directory lock)))))
+      ;; If ours was broken as stale, the lock there now is someone else's.
+      (when (equal (mu4e-send-later--lock-owner) token)
+        (ignore-errors (delete-directory lock t))))))
 
 (defmacro mu4e-send-later--with-lock (&rest body)
   "Run BODY holding the queue lock."
@@ -783,6 +824,7 @@ SEPARATOR ends the headers."
   (let ((failed 0))
     (mu4e-send-later--with-lock
       (dolist (id (mu4e-send-later--ids))
+        (mu4e-send-later--touch-lock)
         (let ((wake (mu4e-send-later--wake-time (mu4e-send-later--meta id))))
           (when (and wake (<= wake (float-time)))
             (unless (mu4e-send-later--attempt id)

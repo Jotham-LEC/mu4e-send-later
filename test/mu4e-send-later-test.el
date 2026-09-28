@@ -476,6 +476,74 @@ Skips the test where org-msg isn't installed, except on CI."
       (should (eq 'ran (mu4e-send-later--with-lock 'ran)))
       (should-not (file-exists-p lock)))))
 
+(defconst msl-test--dead-pid 999999999
+  "A PID no process has.")
+
+(defun msl-test--hold-lock (pid host &optional age)
+  "Make the queue lock look held by PID on HOST, taken AGE seconds ago."
+  (let ((lock (mu4e-send-later--dir ".lock")))
+    (make-directory lock t)
+    (with-temp-file (expand-file-name "owner" lock)
+      (insert (format "%d %s someone-else\n" pid host)))
+    (when age
+      (set-file-times lock (time-subtract nil age)))
+    lock))
+
+(defmacro msl-test--with-lock-deadline (&rest body)
+  "Run BODY with the lock's wait deadline passing at once."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'float-time)
+              (let ((calls 0)) (lambda (&rest _) (cl-incf calls 100)))))
+     ,@body))
+
+(ert-deftest msl-test-stale-lock-of-a-dead-owner-is-broken ()
+  (msl-test--with-queue
+    (let ((lock (msl-test--hold-lock msl-test--dead-pid (system-name) 3600)))
+      (should (eq 'ran (mu4e-send-later--with-lock 'ran)))
+      (should-not (file-exists-p lock)))))
+
+(ert-deftest msl-test-old-lock-of-a-live-owner-is-not-stale ()
+  (msl-test--with-queue
+    ;; Our own PID stands in for another live process on this host.
+    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name) 3600)))
+      (msl-test--with-lock-deadline
+        (should-error (mu4e-send-later--with-lock t) :type 'mu4e-send-later-error))
+      (should (file-exists-p (expand-file-name "owner" lock))))))
+
+(ert-deftest msl-test-lock-writes-its-owner-and-keeps-others-locks ()
+  (msl-test--with-queue
+    (let ((lock (mu4e-send-later--dir ".lock")))
+      (mu4e-send-later--with-lock
+        (with-temp-buffer
+          (insert-file-contents (expand-file-name "owner" lock))
+          (should (string-prefix-p (format "%d %s " (emacs-pid) (system-name))
+                                   (buffer-string))))
+        ;; Our lock was broken as stale and someone else took it.
+        (delete-directory lock t)
+        (msl-test--hold-lock msl-test--dead-pid (system-name)))
+      (should (file-exists-p (expand-file-name "owner" lock))))))
+
+(ert-deftest msl-test-flush-keeps-the-lock-fresh ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600)))
+          (lock (mu4e-send-later--dir ".lock"))
+          (age nil))
+      (msl-test--make-due id)
+      (cl-letf* ((ids (symbol-function 'mu4e-send-later--ids))
+                 ;; As if the lock had been held a long time already.
+                 ((symbol-function 'mu4e-send-later--ids)
+                  (lambda ()
+                    (set-file-times lock (time-subtract nil 3600))
+                    (funcall ids)))
+                 (send (symbol-function 'mu4e-send-later--send))
+                 ((symbol-function 'mu4e-send-later--send)
+                  (lambda (id)
+                    (setq age (float-time (time-since (file-attribute-modification-time
+                                                       (file-attributes lock)))))
+                    (funcall send id))))
+        (mu4e-send-later--flush))
+      (should (< age 60)))))
+
 ;;;; Startup check and listing
 
 (ert-deftest msl-test-check-warns-about-failed-and-sends-overdue ()
