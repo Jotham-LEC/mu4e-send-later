@@ -941,7 +941,7 @@ Schedule a retry, or once they are used up, mark it failed."
             mu4e-send-later-emacs-program (plist-get config :emacs-program)))))
 
 (defun mu4e-send-later-batch-flush ()
-  "Send due mail from a background Emacs; the scheduler runs this."
+  "Send due mail from a background Emacs, as the scheduler does."
   (unless noninteractive
     (error "`mu4e-send-later-batch-flush' is for Emacs in batch mode"))
   (mu4e-send-later--batch-setup)
@@ -1091,7 +1091,7 @@ failed messages are reported."
           "\""))
 
 (defun mu4e-send-later--login-command ()
-  "Command the login job runs."
+  "Command line of the login job."
   (mu4e-send-later--command 'mu4e-send-later-batch-flush))
 
 (defun mu4e-send-later--systemd-login-unit-text ()
@@ -1105,7 +1105,7 @@ failed messages are reported."
 
 ;;;###autoload
 (defun mu4e-send-later-install-login-job ()
-  "Send overdue mail at login too, not just when Emacs next starts.
+  "Send overdue mail at login too, not just at the next Emacs start.
 Re-run this if the Emacs executable moves, e.g. after an upgrade."
   (interactive)
   (pcase (mu4e-send-later--backend)
@@ -1271,7 +1271,7 @@ Does nothing unless mu4e is running."
           (run-with-timer 1 nil #'mu4e-send-later--changed))))
 
 (defun mu4e-send-later--watch ()
-  "Resync mu4e whenever the queue changes, as when a background send ends."
+  "Resync mu4e on each change to the queue, as when a background send ends."
   (mu4e-send-later--make-queue-dir)
   (setq mu4e-send-later--watch
         (ignore-error file-notify-error
