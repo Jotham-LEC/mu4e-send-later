@@ -301,6 +301,38 @@ Skips the test where org-msg isn't installed, except on CI."
           (kill-buffer buffer))))
     (should-not (mu4e-send-later--ids))))
 
+(ert-deftest msl-test-smtp-method-header-is-refused-before-sending ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--draft))
+          (sent-now nil))
+      (unwind-protect
+          ;; The header makes message.el bypass `message-send-mail-function'.
+          (cl-letf (((symbol-function 'message-send-mail-with-sendmail)
+                     (lambda () (push 'sendmail sent-now))))
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (insert "X-Message-SMTP-Method: sendmail\n")
+              (should (string-match-p
+                       "X-Message-SMTP-Method"
+                       (cadr (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                                           :type 'user-error)))))
+            (should (buffer-live-p buffer))
+            (should-not sent-now)
+            (should-not msl-test--sent)
+            (should-not (mu4e-send-later--ids)))
+        (kill-buffer buffer)))))
+
+(ert-deftest msl-test-message-server-alist-is-not-applied ()
+  (msl-test--with-queue
+    (let ((message-server-alist '(("me@example.com" . "sendmail")))
+          (sent-now nil))
+      (cl-letf (((symbol-function 'message-send-mail-with-sendmail)
+                 (lambda () (push 'sendmail sent-now))))
+        (let ((id (car (msl-test--schedule 3600))))
+          (should-not sent-now)
+          (should (equal (mu4e-send-later--ids) (list id)))
+          (should-not (string-match-p "X-Message-SMTP-Method" (msl-test--stored id))))))))
+
 (ert-deftest msl-test-preflight-fails-on-an-unconfigured-send-function ()
   (msl-test--with-queue
     (dolist (send-function '("message--default-send-mail-function" "sendmail-query-once"))

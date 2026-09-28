@@ -686,12 +686,17 @@ TIME is a Unix time in seconds; interactively it is read with
     (setq send-function (mu4e-send-later--effective-send-function send-function))
     (when-let* ((problem (mu4e-send-later--send-function-problem send-function)))
       (user-error "Can't schedule: %s" problem))
+    ;; message.el sends a message with this header itself, straight away.
+    (unless (string-empty-p (mu4e-send-later--header "X-Message-SMTP-Method"))
+      (user-error "Scheduling doesn't support X-Message-SMTP-Method yet; remove the header to schedule this message"))
     (when (and (derived-mode-p 'org-msg-edit-mode) (fboundp 'org-msg-sanity-check))
       (org-msg-sanity-check))
     (let ((message-send-mail-function
            (lambda () (setq id (mu4e-send-later--enqueue time send-function))))
           ;; Split sends would queue each part separately.
-          (message-send-mail-partially-limit nil))
+          (message-send-mail-partially-limit nil)
+          ;; Otherwise it adds X-Message-SMTP-Method, which sends now.
+          (message-server-alist nil))
       (message-send-and-exit))
     (unless id
       (signal 'mu4e-send-later-error
