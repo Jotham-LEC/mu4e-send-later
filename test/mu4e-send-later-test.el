@@ -132,6 +132,7 @@ Skips the test where org-msg isn't installed, except on CI."
       ;; The stored message is the rendered one: encoded headers, Date,
       ;; Message-ID, MIME-encoded body.
       (with-temp-buffer
+        (set-buffer-multibyte nil)
         (insert-file-contents-literally
          (expand-file-name "message" (mu4e-send-later--item-dir id)))
         (dolist (header '("^Subject: =\\?" "^Date: " "^Message-ID: "
@@ -139,8 +140,11 @@ Skips the test where org-msg isn't installed, except on CI."
                           "^Bcc: hidden@example.com"))
           (goto-char (point-min))
           (should (re-search-forward header nil t)))
+        ;; Compared as bytes: the body is quoted-printable, not raw UTF-8.
         (goto-char (point-min))
-        (should-not (search-forward "ünïcode" nil t))))))
+        (should (search-forward "=C3=BCn=C3=AFcode" nil t))
+        (goto-char (point-min))
+        (should-not (search-forward (encode-coding-string "ünïcode" 'utf-8) nil t))))))
 
 (ert-deftest msl-test-schedule-org-msg-html-draft ()
   (msl-test--with-queue
