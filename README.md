@@ -229,8 +229,9 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
   away. On macOS, 0.2's `com.github.jotham-lec.mu4e-send-later.<number>.plist`
   files in `~/Library/LaunchAgents` are no longer cleaned up; delete them by
   hand.
-- **The launchd backend has not been tested on a Mac yet**; reports welcome.
-  launchd has minute resolution, so on macOS mail goes out up to a minute late.
+- The launchd backend is tested end to end in CI, on GitHub's macOS runners,
+  but not yet on a Mac in daily use; reports welcome. launchd has minute
+  resolution, so on macOS mail goes out up to a minute late.
 
 ## Alternatives
 
@@ -257,7 +258,7 @@ make compile   # byte-compile the package and its tests, warnings are errors
 make lint      # checkdoc, package-lint and relint; fails on any warning
 make format    # indent as plain emacs -Q does (format-check only reports)
 make test      # unit tests, against a fake scheduler and a fake send function
-make integration   # real systemd timers, on a queue of its own, and a fake sendmail
+make integration   # real systemd timers or launchd jobs, on a queue of its own, and a fake sendmail
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

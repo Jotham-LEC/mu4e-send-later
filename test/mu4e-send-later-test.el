@@ -3,10 +3,11 @@
 ;;; Commentary:
 
 ;; Unit tests run against a fake `test' backend and a fake send
-;; function.  The `:integration' tests arm real systemd timers and only
-;; run when MU4E_SEND_LATER_INTEGRATION=1.  They use a queue of their
-;; own, and the timers are named after the queue, so they don't touch
-;; the timers of the queue you use.
+;; function.  The `:integration' tests arm real systemd timers, or real
+;; launchd jobs on macOS, and only run when
+;; MU4E_SEND_LATER_INTEGRATION=1.  They use a queue of their own, and
+;; the timers are named after the queue, so they don't touch the timers
+;; of the queue you use.
 
 ;;; Code:
 
@@ -1713,50 +1714,62 @@ file it removes."
             (should (equal (mu4e-send-later--ids) (list id))))
         (kill-buffer "*mu4e-send-later*")))))
 
-(ert-deftest msl-test-integration-systemd-end-to-end ()
-  "Schedule through a real systemd timer and a fake sendmail."
+(ert-deftest msl-test-integration-end-to-end ()
+  "Schedule through a real systemd timer or launchd job and a fake sendmail."
   :tags '(:integration)
   (skip-unless (equal (getenv "MU4E_SEND_LATER_INTEGRATION") "1"))
-  (skip-unless (mu4e-send-later--systemd-available-p))
-  (let* ((real-tag (mu4e-send-later--queue-tag))
-         (dir (make-temp-file "msl-int-" t))
-         (mu4e-send-later-directory (expand-file-name "queue/" dir))
-         (mu4e-send-later-backend 'systemd)
-         (mu4e-send-later-mode t)
-         (sink (expand-file-name "sent" dir))
-         (sendmail (expand-file-name "fake-sendmail" dir))
-         (sendmail-program sendmail)
-         (message-sendmail-extra-arguments '("--read-envelope-from"))
-         (message-send-mail-function #'message-send-mail-with-sendmail)
-         (message-interactive t))
-    ;; Its own queue, so arming and disarming leave your real timers be.
-    (should-not (equal (mu4e-send-later--queue-tag) real-tag))
-    (unwind-protect
-        (progn
-          (with-temp-file sendmail
-            (insert (format "#!/bin/sh\n{ echo \"ARGS: $*\"; cat; } > %s\n" sink)))
-          (set-file-modes sendmail #o755)
-          (let ((buffer (msl-test--draft "Integration")))
-            (with-current-buffer buffer
-              (setq-local message-send-mail-function #'message-send-mail-with-sendmail)
-              (mu4e-send-later (+ (floor (float-time)) 3))))
-          (should (= 1 (length (mu4e-send-later--ids))))
-          (let ((deadline (+ (float-time) 30)))
-            (while (and (not (file-exists-p sink)) (< (float-time) deadline))
-              (sleep-for 0.5)))
-          (should (file-exists-p sink))
-          (sleep-for 1)
-          (with-temp-buffer
-            (insert-file-contents sink)
-            (should (search-forward "--read-envelope-from" nil t))
-            ;; -oem would have sendmail mail errors back instead of failing.
-            (goto-char (point-min))
-            (should-not (search-forward "-oem" nil t))
-            (should (search-forward "Subject: Integration" nil t))
-            (should-not (search-forward mail-header-separator nil t)))
-          (should-not (mu4e-send-later--ids)))
-      (ignore-errors (mu4e-send-later--backend-disarm 'systemd))
-      (delete-directory dir t))))
+  (let* ((backend (cond ((mu4e-send-later--systemd-available-p) 'systemd)
+                        ((mu4e-send-later--launchd-available-p) 'launchd))))
+    (skip-unless backend)
+    (let* ((real-tag (mu4e-send-later--queue-tag))
+           (dir (make-temp-file "msl-int-" t))
+           (mu4e-send-later-directory (expand-file-name "queue/" dir))
+           (mu4e-send-later-backend backend)
+           (mu4e-send-later-mode t)
+           (sink (expand-file-name "sent" dir))
+           (sendmail (expand-file-name "fake-sendmail" dir))
+           (sendmail-program sendmail)
+           (message-sendmail-extra-arguments '("--read-envelope-from"))
+           (message-send-mail-function #'message-send-mail-with-sendmail)
+           (message-interactive t)
+           (time (+ (floor (float-time)) 3))
+           (wait (lambda (seconds test)
+                   (let ((deadline (+ (float-time) seconds)))
+                     (while (and (not (funcall test)) (< (float-time) deadline))
+                       (sleep-for 0.5)))
+                   (funcall test))))
+      ;; Its own queue, so arming and disarming leave your real timers be.
+      (should-not (equal (mu4e-send-later--queue-tag) real-tag))
+      (unwind-protect
+          (progn
+            (with-temp-file sendmail
+              (insert (format "#!/bin/sh\n{ echo \"ARGS: $*\"; cat; } > %s\n" sink)))
+            (set-file-modes sendmail #o755)
+            (let ((buffer (msl-test--draft "Integration")))
+              (with-current-buffer buffer
+                (setq-local message-send-mail-function #'message-send-mail-with-sendmail)
+                (mu4e-send-later time)))
+            (should (= 1 (length (mu4e-send-later--ids))))
+            ;; launchd fires on the minute.
+            (should (funcall wait (if (eq backend 'launchd) 150 30)
+                             (lambda () (file-exists-p sink))))
+            (should (funcall wait 30 (lambda () (not (mu4e-send-later--ids)))))
+            (with-temp-buffer
+              (insert-file-contents sink)
+              (should (search-forward "--read-envelope-from" nil t))
+              ;; -oem would have sendmail mail errors back instead of failing.
+              (goto-char (point-min))
+              (should-not (search-forward "-oem" nil t))
+              (should (search-forward "Subject: Integration" nil t))
+              (should-not (search-forward mail-header-separator nil t)))
+            (when (eq backend 'launchd)
+              ;; The job that sent it unloaded itself, and left no plist.
+              (let ((label (mu4e-send-later--launchd-label time)))
+                (should (funcall wait 30 (lambda ()
+                                           (not (mu4e-send-later--launchd-loaded-p label)))))
+                (should-not (file-exists-p (mu4e-send-later--launchd-plist-file label))))))
+        (ignore-errors (mu4e-send-later--backend-disarm backend))
+        (delete-directory dir t)))))
 
 (provide 'mu4e-send-later-test)
 ;;; mu4e-send-later-test.el ends here

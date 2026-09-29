@@ -24,8 +24,9 @@ compile:
 test:
 	$(BATCH) -l $(TESTS) -f ert-run-tests-batch-and-exit
 
-# Arms real systemd user timers, for a queue of its own; needs a running
-# systemd user manager.
+# Arms real systemd user timers, or on macOS real launchd jobs, for a
+# queue of its own; needs a running systemd user manager, or a login
+# session on macOS.
 integration:
 	MU4E_SEND_LATER_INTEGRATION=1 $(BATCH) -l $(TESTS) \
 	  --eval '(ert-run-tests-batch-and-exit (quote (tag :integration)))'
