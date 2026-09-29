@@ -1326,16 +1326,33 @@ The library moves when the package is upgraded."
     (when (file-exists-p file)
       (with-temp-buffer
         (insert-file-contents file)
-        (let ((emacs (when (re-search-forward
-                            (concat "\\(?:ExecStart=\"\\|<key>ProgramArguments</key>"
-                                    "\\s-*<array>\\s-*<string>\\)\\([^\"<]+\\)")
-                            nil t)
-                       (match-string 1)))
-              (library (when (re-search-forward
-                              "\\(?:\"-L\" \"\\|<string>-L</string>\\s-*<string>\\)\\([^\"<]+\\)"
-                              nil t)
-                         (match-string 1)))
-              (current (ignore-errors (mu4e-send-later--library-dir))))
+        (let* ((plist (string-suffix-p ".plist" file))
+               ;; An argument as written there, and read back from that.
+               (value (if plist
+                          "<string>\\([^<]*\\)</string>"
+                        "\"\\(\\(?:[^\"\\]\\|\\\\.\\)*\\)\""))
+               (read (lambda ()
+                       (if plist
+                           (replace-regexp-in-string
+                            "&\\(?:amp\\|lt\\|gt\\);"
+                            (lambda (s) (pcase s ("&amp;" "&") ("&lt;" "<") (_ ">")))
+                            (match-string 1) t t)
+                         (replace-regexp-in-string
+                          "\\\\.\\|%%\\|\\$\\$"
+                          (lambda (s) (substring s 1))
+                          (match-string 1) t t))))
+               (emacs (when (re-search-forward
+                             (concat (if plist
+                                         "<key>ProgramArguments</key>\\s-*<array>\\s-*"
+                                       "ExecStart=")
+                                     value)
+                             nil t)
+                        (funcall read)))
+               (library (when (re-search-forward
+                               (concat (if plist "<string>-L</string>\\s-*" "\"-L\" ") value)
+                               nil t)
+                          (funcall read)))
+               (current (ignore-errors (mu4e-send-later--library-dir))))
           (when (and emacs (not (file-executable-p emacs)))
             (display-warning
              'mu4e-send-later

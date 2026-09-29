@@ -1393,6 +1393,23 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
 (ert-deftest msl-test-current-login-job-is-not-reported ()
   (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
 
+;; The unit file and the plist escape these; they're read back unescaped.
+(ert-deftest msl-test-login-job-with-odd-characters-is-not-reported ()
+  (let* ((odd (make-temp-file "msl-a&b<c>%d$e\\f\"g-" t))
+         (mu4e-send-later-emacs-program (expand-file-name "emacs" odd))
+         (library (file-name-as-directory (expand-file-name "lisp" odd))))
+    (unwind-protect
+        (progn
+          (make-symbolic-link (expand-file-name invocation-name invocation-directory)
+                              mu4e-send-later-emacs-program)
+          (make-directory library)
+          (cl-letf (((symbol-function 'mu4e-send-later--library-dir) (lambda () library)))
+            (should-not (msl-test--login-job-warnings library))
+            ;; And a moved one still is.
+            (should (= 2 (length (msl-test--login-job-warnings
+                                  (file-name-as-directory (expand-file-name "old" odd))))))))
+      (delete-directory odd t))))
+
 (defvar msl-test--launchd nil
   "Jobs the fake launchd has loaded: (LABEL . PRINTS-LEFT).
 PRINTS-LEFT is nil, or once booted out, the number of times it still
