@@ -806,20 +806,27 @@ Called where `message-send-mail-function' would be.  Return the new ID."
                      :draft-file (plist-get mu4e-send-later--draft :file))))
     (mu4e-send-later--preflight backend send-function vars)
     (mu4e-send-later--with-lock
-      (with-file-modes #o700
-        (make-directory tmp t)
-        (save-restriction
-          (widen)
-          (let ((coding-system-for-write
-                 (if enable-multibyte-characters 'utf-8-unix 'no-conversion)))
-            (write-region nil nil (expand-file-name "message" tmp) nil 'silent)))
-        (when mu4e-send-later--draft
-          (let ((coding-system-for-write 'utf-8-unix))
-            (write-region (plist-get mu4e-send-later--draft :text) nil
-                          (expand-file-name "draft" tmp) nil 'silent))))
-      (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
-      ;; The rename is what makes the item visible to a sender.
-      (rename-file tmp (mu4e-send-later--item-dir id))
+      ;; Written in full or not at all: a copy of the message mustn't be
+      ;; left behind where nothing would remove it.
+      (condition-case err
+          (progn
+            (with-file-modes #o700
+              (make-directory tmp t)
+              (save-restriction
+                (widen)
+                (let ((coding-system-for-write
+                       (if enable-multibyte-characters 'utf-8-unix 'no-conversion)))
+                  (write-region nil nil (expand-file-name "message" tmp) nil 'silent)))
+              (when mu4e-send-later--draft
+                (let ((coding-system-for-write 'utf-8-unix))
+                  (write-region (plist-get mu4e-send-later--draft :text) nil
+                                (expand-file-name "draft" tmp) nil 'silent))))
+            (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
+            ;; The rename is what makes the item visible to a sender.
+            (rename-file tmp (mu4e-send-later--item-dir id)))
+        ((error quit)
+         (ignore-errors (delete-directory tmp t))
+         (signal (car err) (cdr err))))
       ;; If the wake-up can't be armed, or you quit arming it, take the
       ;; message back out so the error aborts the send and the draft
       ;; stays open.

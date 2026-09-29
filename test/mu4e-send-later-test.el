@@ -383,6 +383,23 @@ Skips the test where org-msg isn't installed, except on CI."
       (should (string-match-p "no scheduler" (nth 1 (car msl-test--notified))))
       (should (nth 2 (car msl-test--notified))))))
 
+(ert-deftest msl-test-failed-write-leaves-nothing-in-the-queue ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--draft "Disk full")))
+      (unwind-protect
+          (cl-letf* ((write (symbol-function 'write-region))
+                     ((symbol-function 'write-region)
+                      (lambda (start end file &rest args)
+                        (if (equal (file-name-nondirectory file) "draft")
+                            (signal 'file-error (list "Writing" "No space left on device" file))
+                          (apply write start end file args)))))
+            (with-current-buffer buffer
+              (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                            :type 'file-error)))
+        (kill-buffer buffer))
+      (should-not (mu4e-send-later--ids))
+      (should-not (directory-files (mu4e-send-later--dir) nil "\\`\\.tmp-")))))
+
 ;; As when systemd-run hangs and you press C-g.
 (ert-deftest msl-test-quit-while-arming-takes-the-message-back-out ()
   (msl-test--with-queue
