@@ -57,7 +57,7 @@ A review of what could send mail twice, send it now, or not send it at all.
 - `make lint` fails on checkdoc warnings, and runs package-lint. CI adds Emacs 31.1
   and melpazoid.
 
-## [0.2.0] — 2026-09-28
+## 0.2.0 — 2026-09-28
 
 ### Added
 - **Scheduled mail shows in mu4e.** Each queued message is copied into its own
@@ -66,7 +66,7 @@ A review of what could send mail twice, send it now, or not send it at all.
   well as from the list. Edit reopens the draft as written, back in its Drafts maildir
   and back in org-msg.
 
-## [0.1.0] — 2026-09-27
+## 0.1.0 — 2026-09-27
 
 First version.
 
@@ -79,6 +79,4 @@ First version.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
 [Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Jotham-LEC/mu4e-send-later/releases/tag/v0.1.0
+[0.3.0]: https://github.com/Jotham-LEC/mu4e-send-later/releases/tag/v0.3.0
