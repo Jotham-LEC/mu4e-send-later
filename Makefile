@@ -1,7 +1,7 @@
 EMACS ?= emacs
 # Test and lint dependencies (org-msg, package-lint, relint), installed by
-# `make deps'; one directory per Emacs version, as their .elc files differ.
-DEPS = $(CURDIR)/.deps/$(shell $(EMACS) -Q --batch --eval '(princ emacs-version)')
+# `make deps'; one directory per major Emacs version, as their .elc files differ.
+DEPS = $(CURDIR)/.deps/$(shell $(EMACS) -Q --batch --eval '(princ emacs-major-version)')
 # Prefer newer sources, so a stale .elc from `make compile' isn't tested.
 BATCH = $(EMACS) -Q --batch --eval '(setq load-prefer-newer t)' \
 	--eval '(setq package-user-dir "$(DEPS)")' -f package-initialize -L .
