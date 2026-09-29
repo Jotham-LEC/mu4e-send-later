@@ -1455,7 +1455,11 @@ Does nothing unless mu4e is running."
 (defun mu4e-send-later--open-draft (text meta)
   "Open TEXT, a draft queued with META, for editing."
   (let ((file (plist-get meta :draft-file)))
-    (if (and file (fboundp 'mu4e--draft))
+    (if (and file (fboundp 'mu4e--draft)
+             ;; Not one message.el saved itself, outside any maildir.
+             (member (file-name-nondirectory
+                      (directory-file-name (file-name-directory file)))
+                     '("cur" "new")))
         ;; Back in the Drafts maildir it was scheduled from, opened the
         ;; way `mu4e-compose-edit' opens a draft.
         (let ((path (expand-file-name

@@ -1851,6 +1851,34 @@ file it removes."
             (should (search-forward "Subject: Org plans\n\n:PROPERTIES:" nil t))
             (should (search-forward "This is *bold*." nil t))))))))
 
+;; As message.el saves one itself, in `message-auto-save-directory'.
+(ert-deftest msl-test-edit-draft-saved-outside-a-maildir ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let* ((drafts (expand-file-name "Mail/drafts/" root))
+             (buffer (msl-test--draft "Plain"))
+             (message-interactive t)
+             id)
+        (make-directory drafts t)
+        (with-current-buffer buffer
+          (setq buffer-file-name (expand-file-name "*message*-20260929-101010" drafts))
+          (setq id (mu4e-send-later (+ (floor (float-time)) 3600))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (cl-letf (((symbol-function 'mu4e--draft)
+                   (lambda (_type fn &optional _parent) (funcall fn)))
+                  ((symbol-function 'mu4e--delimit-headers) #'ignore))
+          (msl-test--in-mu4e-on (msl-test--mirror id) #'mu4e-send-later-edit))
+        (should-not (mu4e-send-later--ids))
+        (let ((draft (car (match-buffers "\\`\\*unsent mail\\*"))))
+          (should draft)
+          (with-current-buffer draft
+            (goto-char (point-min))
+            (should (search-forward "Subject: Plain\n" nil t)))
+          (kill-buffer draft))
+        ;; Nothing written where a maildir isn't.
+        (should (equal (directory-files (expand-file-name "Mail/" root) nil "\\`[^.]")
+                       '("drafts")))))))
+
 (defun msl-test--edit-in-list (subject)
   "Call `mu4e-send-later-edit' on SUBJECT in the list."
   (mu4e-send-later-list)
