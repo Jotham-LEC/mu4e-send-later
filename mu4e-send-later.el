@@ -890,8 +890,21 @@ Schedule a retry, or once they are used up, mark it failed."
                       id (plist-put (copy-sequence meta) :state 'sending))
                      (mu4e-send-later--send id)
                      t)
-                 (error (mu4e-send-later--record-failure id meta err)
-                        nil))))
+                 (error
+                  (let ((reason (error-message-string err)))
+                    (if (string-prefix-p "Sending...failed to " reason)
+                        ;; sendmail exited 0, so it took the message, but
+                        ;; it printed something, which message.el and
+                        ;; sendmail.el call failing.  Retrying would send
+                        ;; the message again.
+                        (progn
+                          (mu4e-send-later--notify
+                           "Scheduled mail sent, with a warning"
+                           (format "%s: sendmail said: %s" (plist-get meta :subject)
+                                   (string-remove-prefix "Sending...failed to " reason)))
+                          t)
+                      (mu4e-send-later--record-failure id meta err)
+                      nil))))))
     (when sent
       (mu4e-send-later--log "sent %s: %s" id (plist-get meta :subject))
       ;; A failed cleanup mustn't count as a failed send, which would be

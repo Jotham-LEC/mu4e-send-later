@@ -167,7 +167,9 @@ At send time a failure is recorded on the message and retried after 2, 5, 15 and
 first failure. After the last retry the message is marked failed, you get an
 urgent notification, and it stays in the queue until you retry or cancel it.
 Each time Emacs starts, `mu4e-send-later-mode` warns about failed messages. That
-also catches the case where the timer never fired at all.
+also catches the case where the timer never fired at all. A sendmail that
+exits 0 but prints something (a warning from msmtp, say) took the message, so
+it counts as sent, and what it printed is shown in a notification.
 
 Delivery is at most once, and loud about it. A message is marked `sending`
 just before it's handed to your send function. If the sender dies right then

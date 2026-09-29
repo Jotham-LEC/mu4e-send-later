@@ -485,6 +485,80 @@ Skips the test where org-msg isn't installed, except on CI."
       (should (equal (mu4e-send-later--ids) (list id)))
       (should-not msl-test--armed))))
 
+(defun msl-test--fake-sendmail (dir script)
+  "Write an executable sendmail to DIR running shell SCRIPT; return its path.
+Each message it reads is appended to DIR/sent, followed by a line
+\"DELIVERED\"."
+  (let ((file (expand-file-name "sendmail" dir)))
+    (with-temp-file file
+      (insert "#!/bin/sh\n"
+              (format "cat >> %s\necho DELIVERED >> %s\n"
+                      (shell-quote-argument (expand-file-name "sent" dir))
+                      (shell-quote-argument (expand-file-name "sent" dir)))
+              script "\n"))
+    (set-file-modes file #o755)
+    file))
+
+(defun msl-test--deliveries (dir)
+  "How many messages the fake sendmail in DIR delivered."
+  (let ((file (expand-file-name "sent" dir)))
+    (if (file-exists-p file)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (how-many "^DELIVERED$" (point-min) (point-max)))
+      0)))
+
+;; message.el and sendmail.el report any output from a sendmail that
+;; exited 0 as "Sending...failed to"; the message went out all the same.
+(ert-deftest msl-test-sendmail-warning-is-a-send-not-a-failure ()
+  (msl-test--with-queue
+    (let* ((dir (make-temp-file "msl-sendmail-" t))
+           (mu4e-send-later-variables '(sendmail-program message-sendmail-f-is-evil))
+           (sendmail-program (msl-test--fake-sendmail
+                              dir "echo 'msmtp: TLS certificate expires soon' >&2\nexit 0"))
+           (message-sendmail-f-is-evil t)
+           (buffer (msl-test--draft "Warned")))
+      (unwind-protect
+          (let ((id (with-current-buffer buffer
+                      (setq-local message-send-mail-function
+                                  #'message-send-mail-with-sendmail)
+                      (let ((message-interactive t))
+                        (mu4e-send-later (+ (floor (float-time)) 3600))))))
+            (msl-test--make-due id)
+            (should (zerop (mu4e-send-later--flush)))
+            ;; Nothing left to send again.
+            (should-not (mu4e-send-later--ids))
+            (dotimes (_ 2) (mu4e-send-later--flush))
+            (should (= (msl-test--deliveries dir) 1))
+            (should (= (length msl-test--notified) 1))
+            (should (string-match-p "Warned: .*TLS certificate expires soon"
+                                    (nth 1 (car msl-test--notified)))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (delete-directory dir t)))))
+
+;; And a sendmail that fails is still retried.
+(ert-deftest msl-test-sendmail-that-exits-non-zero-is-retried ()
+  (msl-test--with-queue
+    (let* ((dir (make-temp-file "msl-sendmail-" t))
+           (mu4e-send-later-variables '(sendmail-program message-sendmail-f-is-evil))
+           (sendmail-program (msl-test--fake-sendmail dir "echo 'no route' >&2\nexit 75"))
+           (message-sendmail-f-is-evil t)
+           (buffer (msl-test--draft "Refused")))
+      (unwind-protect
+          (let ((id (with-current-buffer buffer
+                      (setq-local message-send-mail-function
+                                  #'message-send-mail-with-sendmail)
+                      (let ((message-interactive t))
+                        (mu4e-send-later (+ (floor (float-time)) 3600))))))
+            (msl-test--make-due id)
+            (should (= 1 (mu4e-send-later--flush)))
+            (let ((meta (mu4e-send-later--meta id)))
+              (should (eq (plist-get meta :state) 'pending))
+              (should (= (plist-get meta :attempts) 1))
+              (should (string-match-p "exit value 75" (plist-get meta :last-error)))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (delete-directory dir t)))))
+
 (ert-deftest msl-test-item-is-marked-sending-while-it-sends ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600)))
