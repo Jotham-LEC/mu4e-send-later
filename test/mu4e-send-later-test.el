@@ -1421,15 +1421,16 @@ Not in a launchd job, to begin with."
     (let ((label (mu4e-send-later--launchd-label 1790000000)))
       (mu4e-send-later--backend-arm 'launchd 1790000000)
       (setq msl-test--launchctl nil)
-      ;; Arming it again from inside it, as the login job might.
-      (let ((process-environment (msl-test--in-launchd-job label)))
-        (mu4e-send-later--backend-arm 'launchd 1790000000)
+      ;; Loading it again from inside it, as the login job might.
+      (let ((process-environment (msl-test--in-launchd-job label))
+            (xml (mu4e-send-later--plist-xml label '("/x/emacs") 1790000000)))
+        (mu4e-send-later--launchd-load label xml)
         (should-not msl-test--launchctl)
         ;; An older job only named itself in launchd's variable.
         (let ((process-environment (cons (concat "XPC_SERVICE_NAME=" label)
                                          process-environment)))
           (setenv "MU4E_SEND_LATER_JOB")
-          (mu4e-send-later--backend-arm 'launchd 1790000000)
+          (mu4e-send-later--launchd-load label xml)
           (should-not msl-test--launchctl)))
       (should (equal (mapcar #'car msl-test--launchd) (list label))))))
 
@@ -1471,6 +1472,37 @@ Not in a launchd job, to begin with."
         (should (eql 0 (funcall flush login)))
         (should-not msl-test--launchctl)
         (should (file-exists-p (mu4e-send-later--launchd-plist-file login)))))))
+
+;; launchd's calendar is local time: after a move east, or in the hour
+;; repeated as summer time ends, a job fires before its message is due.
+;; The job can't be reloaded from inside, and unloads itself once done,
+;; so another must wake up for the message.
+(ert-deftest msl-test-launchd-job-that-fires-early-leaves-a-wake-up ()
+  (msl-test--with-queue
+    (msl-test--with-fake-launchd
+      (let* ((id (car (msl-test--schedule 3600 "Early")))
+             (due (plist-get (mu4e-send-later--meta id) :due))
+             (label (mu4e-send-later--launchd-label due)))
+        (cl-letf (((symbol-function 'mu4e-send-later--backend) (lambda () 'launchd)))
+          (mu4e-send-later--arm)
+          (should (equal (mapcar #'car msl-test--launchd) (list label)))
+          (let ((process-environment (msl-test--in-launchd-job label))
+                (command-line-args-left (list (mu4e-send-later--dir))))
+            (cl-letf (((symbol-function 'kill-emacs)
+                       (lambda (&optional status) (throw 'exit status))))
+              (should (eql 0 (catch 'exit (mu4e-send-later-batch-flush)))))))
+        (should (equal (mu4e-send-later--ids) (list id)))
+        (should (= (length msl-test--launchd) 1))
+        (should-not (equal (car (car msl-test--launchd)) label))
+        (should (equal (directory-files agents nil "\\.plist\\'")
+                       (list (concat (car (car msl-test--launchd)) ".plist"))))
+        ;; For when the message is due.
+        (with-temp-buffer
+          (insert-file-contents (concat agents "/" (car (car msl-test--launchd)) ".plist"))
+          (let ((d (decode-time (seconds-to-time (* 60 (ceiling due 60))))))
+            (should (search-forward (format "<key>Hour</key><integer>%d</integer>\n    <key>Minute</key><integer>%d</integer>"
+                                            (decoded-time-hour d) (decoded-time-minute d))
+                                    nil t))))))))
 
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")

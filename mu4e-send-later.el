@@ -582,9 +582,20 @@ XPC_SERVICE_NAME, all that older ones have, isn't always the label."
             (sleep-for 0.1))))
       (mu4e-send-later--call "launchctl" "bootstrap" (mu4e-send-later--launchd-domain) file))))
 
+(defun mu4e-send-later--launchd-job-label (time)
+  "Label of the job to arm for TIME: TIME's, unless that job is running us.
+Then it fired early, as it does when the clock moves to a zone further
+east or back an hour as summer time ends, launchd's calendar being in
+local time.  It can't be reloaded from inside, and unloads itself once
+it is done, so the job is armed for a second later instead."
+  (let ((label (mu4e-send-later--launchd-label time)))
+    (if (equal label (mu4e-send-later--launchd-running-job))
+        (mu4e-send-later--launchd-label (1+ time))
+      label)))
+
 (cl-defmethod mu4e-send-later--backend-arm ((_ (eql launchd)) time)
   "Wake up to run the queue at TIME, with a launchd job."
-  (let ((label (mu4e-send-later--launchd-label time)))
+  (let ((label (mu4e-send-later--launchd-job-label time)))
     (mu4e-send-later--launchd-load
      label (mu4e-send-later--plist-xml
             label (mu4e-send-later--command 'mu4e-send-later-batch-flush) time))))
@@ -608,7 +619,7 @@ XPC_SERVICE_NAME, all that older ones have, isn't always the label."
 
 (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql launchd)) time)
   "Non-nil if a launchd job wake-up is set for TIME."
-  (mu4e-send-later--launchd-loaded-p (mu4e-send-later--launchd-label time)))
+  (mu4e-send-later--launchd-loaded-p (mu4e-send-later--launchd-job-label time)))
 
 (defun mu4e-send-later--launchd-retire ()
   "Unload the launchd wake-up running us, if one is, now it has fired.
