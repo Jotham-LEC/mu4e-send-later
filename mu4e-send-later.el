@@ -1404,12 +1404,18 @@ Does nothing unless mu4e is running."
     (unless id
       (user-error "Not on a scheduled message"))
     (unless (file-exists-p (expand-file-name "meta.eld" (mu4e-send-later--item-dir id)))
-      (mu4e-send-later--changed)
-      (user-error "That message is no longer scheduled"))
+      (mu4e-send-later--gone))
     id))
 
+(defun mu4e-send-later--gone ()
+  "Say that the message acted on has left the queue, and show it has."
+  (mu4e-send-later--changed)
+  (user-error "That message was already sent, or cancelled"))
+
 (defun mu4e-send-later--unschedule (id)
-  "Take ID out of the queue, keeping a copy in cancelled/."
+  "Take ID out of the queue, keeping a copy in cancelled/.
+Signal `file-missing' if it has left the queue already, as when a
+background send got to it first."
   (mu4e-send-later--with-lock
     (make-directory (mu4e-send-later--dir "cancelled") t)
     (rename-file (mu4e-send-later--item-dir id) (mu4e-send-later--dir "cancelled" id))
@@ -1423,8 +1429,7 @@ Does nothing unless mu4e is running."
     (mu4e-send-later--set-meta
      id (funcall fn (condition-case nil
                         (mu4e-send-later--meta id)
-                      (file-missing
-                       (user-error "That message was already sent, or cancelled")))))
+                      (file-missing (mu4e-send-later--gone)))))
     (mu4e-send-later--arm))
   (mu4e-send-later--changed))
 
@@ -1435,7 +1440,10 @@ Does nothing unless mu4e is running."
   (let* ((id (mu4e-send-later--id-at-point))
          (meta (mu4e-send-later--checked-meta id)))
     (when (yes-or-no-p (format "Cancel \"%s\"? " (or (plist-get meta :subject) id)))
-      (mu4e-send-later--unschedule id)
+      ;; It may have been sent while you were asked.
+      (condition-case nil
+          (mu4e-send-later--unschedule id)
+        (file-missing (mu4e-send-later--gone)))
       (message "Cancelled; the message is in %s" (mu4e-send-later--dir "cancelled" id)))))
 
 ;;;###autoload
@@ -1444,18 +1452,25 @@ Does nothing unless mu4e is running."
 Schedule it again with `mu4e-send-later' once edited."
   (interactive)
   (let* ((id (mu4e-send-later--id-at-point))
-         (meta (mu4e-send-later--meta id))
+         (meta (condition-case nil
+                   (mu4e-send-later--meta id)
+                 (file-missing (mu4e-send-later--gone))))
          (file (expand-file-name "draft" (mu4e-send-later--item-dir id))))
     (unless (file-exists-p file)
       (user-error "This message was scheduled without keeping its draft; cancel it and write it again"))
-    (let ((text (with-temp-buffer
-                  (let ((coding-system-for-read 'utf-8-unix))
-                    (insert-file-contents file))
-                  (buffer-string))))
+    (let ((text (condition-case nil
+                    (with-temp-buffer
+                      (let ((coding-system-for-read 'utf-8-unix))
+                        (insert-file-contents file))
+                      (buffer-string))
+                  (file-missing (mu4e-send-later--gone)))))
       ;; Draft first: if it can't be opened, nothing has changed.
       (mu4e-send-later--open-draft text meta)
       (condition-case err
           (mu4e-send-later--unschedule id)
+        (file-missing
+         (mu4e-send-later--changed)
+         (error "Opened the draft, but the original was sent (or cancelled) meanwhile; sending the draft would send it again"))
         (error
          (error "Opened the draft, but the original is still scheduled (%s); cancel it before sending the draft"
                 (error-message-string err))))

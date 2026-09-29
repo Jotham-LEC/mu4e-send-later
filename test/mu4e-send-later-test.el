@@ -1395,6 +1395,48 @@ file it removes."
       (should opened)
       (should (equal (mu4e-send-later--ids) (list id))))))
 
+(defun msl-test--send-in-background (id)
+  "Send item ID, as a background sender would, from another process."
+  (msl-test--make-due id)
+  (mu4e-send-later--flush))
+
+(ert-deftest msl-test-cancel-after-a-background-send-says-it-was-sent ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Raced"))))
+      (mu4e-send-later-list)
+      (unwind-protect
+          (with-current-buffer "*mu4e-send-later*"
+            (goto-char (point-min))
+            (search-forward "Raced")
+            ;; Sent while you were asked to confirm.
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (_) (msl-test--send-in-background id) t)))
+              (should (string-match-p
+                       "already sent"
+                       (cadr (should-error (mu4e-send-later-cancel) :type 'user-error)))))
+            (should (= (length msl-test--sent) 1))
+            (should-not (file-exists-p (mu4e-send-later--dir "cancelled" id)))
+            ;; The lock was let go.
+            (should-not (file-exists-p (mu4e-send-later--lock-dir))))
+        (kill-buffer "*mu4e-send-later*")))))
+
+(ert-deftest msl-test-edit-after-a-background-send-says-it-was-sent ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Raced")))
+          (opened nil))
+      ;; Sent while the draft was being opened.
+      (cl-letf (((symbol-function 'mu4e-send-later--open-draft)
+                 (lambda (&rest _)
+                   (setq opened t)
+                   (msl-test--send-in-background id))))
+        (let ((message (error-message-string
+                        (should-error (msl-test--edit-in-list "Raced")))))
+          (should (string-match-p "was sent" message))
+          (should (string-match-p "send it again" message))
+          (should-not (string-match-p "still scheduled" message))))
+      (should opened)
+      (should (= (length msl-test--sent) 1)))))
+
 (ert-deftest msl-test-edit-says-where-the-original-went ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600 "Kept")))
