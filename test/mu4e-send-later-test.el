@@ -1011,6 +1011,24 @@ Each message it reads is appended to DIR/sent, followed by a line
           (should (search-forward "pending" nil t)))
       (kill-buffer "*mu4e-send-later*"))))
 
+(ert-deftest msl-test-list-sorts-by-when-due ()
+  (msl-test--with-queue
+    ;; The weekdays of four days in a row are never in alphabetical order.
+    (dolist (day '(3 1 4 2))
+      (msl-test--schedule (* 86400 day) (format "day%d" day)))
+    (mu4e-send-later-list)
+    (unwind-protect
+        (with-current-buffer "*mu4e-send-later*"
+          (let ((subjects (lambda ()
+                            (mapcar (lambda (entry) (aref (cadr entry) 3))
+                                    tabulated-list-entries))))
+            (goto-char (point-min))
+            (tabulated-list-sort 0)
+            (should (equal (funcall subjects) '("day1" "day2" "day3" "day4")))
+            (tabulated-list-sort 0)
+            (should (equal (funcall subjects) '("day4" "day3" "day2" "day1")))))
+      (kill-buffer "*mu4e-send-later*"))))
+
 ;;;; Backend details
 
 (ert-deftest msl-test-launchd-plist-rounds-up-and-escapes ()

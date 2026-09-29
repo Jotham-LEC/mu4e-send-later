@@ -1535,7 +1535,7 @@ Schedule it again with `mu4e-send-later' once edited."
 (define-derived-mode mu4e-send-later-list-mode tabulated-list-mode "Send-Later"
   "List of scheduled messages.
 \\{mu4e-send-later-list-mode-map}"
-  (setq tabulated-list-format [("Due" 17 t) ("State" 9 t) ("To" 28 t)
+  (setq tabulated-list-format [("Due" 17 mu4e-send-later--due<) ("State" 9 t) ("To" 28 t)
                                ("Subject" 40 t) ("Last error" 0 nil)]
         tabulated-list-sort-key nil)
   (add-hook 'tabulated-list-revert-hook #'mu4e-send-later--list-refresh nil t)
@@ -1546,7 +1546,8 @@ Schedule it again with `mu4e-send-later' once edited."
   (if (not meta)
       (vector "" (propertize "unreadable" 'face 'error) "" ""
               "meta.eld can't be read; view or cancel it")
-    (vector (format-time-string "%a %F %H:%M" (plist-get meta :due))
+    (vector (propertize (format-time-string "%a %F %H:%M" (plist-get meta :due))
+                        'mu4e-send-later-due (plist-get meta :due))
             (let ((state (symbol-name (plist-get meta :state))))
               (if (eq (plist-get meta :state) 'failed)
                   (propertize state 'face 'error)
@@ -1556,6 +1557,12 @@ Schedule it again with `mu4e-send-later' once edited."
             (or (plist-get meta :to) "")
             (or (plist-get meta :subject) "")
             (or (plist-get meta :last-error) ""))))
+
+(defun mu4e-send-later--due< (a b)
+  "Non-nil if list entry A is due before B, by time, not by its text."
+  (let ((due (lambda (entry)
+               (or (get-text-property 0 'mu4e-send-later-due (aref (cadr entry) 0)) 0))))
+    (< (funcall due a) (funcall due b))))
 
 (defun mu4e-send-later--list-refresh ()
   "Reload the queue into the list buffer."
