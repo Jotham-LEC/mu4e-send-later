@@ -10,8 +10,12 @@
 
 ;;; Code:
 
+(require 'cus-edit)
 (require 'ert)
 (require 'mu4e-send-later)
+
+(declare-function mu4e-root-maildir "ext:mu4e-server" ())
+(declare-function org-msg-edit-mode "ext:org-msg" ())
 
 ;;;; Fixtures
 
@@ -109,6 +113,21 @@ Skips the test where org-msg isn't installed, except on CI."
     (insert-file-contents-literally
      (expand-file-name "message" (mu4e-send-later--item-dir id)))
     (buffer-string)))
+
+;;;; Customization
+
+(ert-deftest msl-test-defaults-match-their-types ()
+  (let (checked mismatched)
+    (mapatoms
+     (lambda (symbol)
+       (when (and (string-prefix-p "mu4e-send-later-" (symbol-name symbol))
+                  (custom-variable-p symbol))
+         (push symbol checked)
+         (unless (widget-apply (widget-convert (get symbol 'custom-type))
+                               :match (default-value symbol))
+           (push symbol mismatched)))))
+    (should checked)
+    (should-not mismatched)))
 
 ;;;; Scheduling
 
@@ -702,8 +721,8 @@ Skips the test where org-msg isn't installed, except on CI."
           (overdue (car (msl-test--schedule 3600 "Overdue")))
           (flushed nil) (warnings nil))
       (mu4e-send-later--set-meta failed (plist-put (plist-put (mu4e-send-later--meta failed)
-                                                             :state 'failed)
-                                                  :last-error "boom"))
+                                                              :state 'failed)
+                                                   :last-error "boom"))
       (msl-test--make-due overdue)
       (cl-letf (((symbol-function 'mu4e-send-later--flush-async)
                  (lambda (&rest _) (setq flushed t)))

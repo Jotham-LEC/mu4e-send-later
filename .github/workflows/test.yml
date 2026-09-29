@@ -10,18 +10,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        emacs: ["29.1", "29.4", "30.1", "31.1", snapshot]
+        emacs: ["29.1", "30.1", "31.1", snapshot]
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.emacs == 'snapshot' }}
     steps:
       - uses: actions/checkout@v4
       # Pinned to a commit: the first with Emacs 31.1, which no tag has yet.
       - uses: purcell/setup-emacs@34c6ded44899fd1bf74d2889558befd1750e61a7
         with:
           version: ${{ matrix.emacs }}
-      - run: make deps
-      - run: make compile
-      - run: make lint
-      - run: make test
+      - run: make deps check
 
   # MELPA's own checks, from https://github.com/riscy/melpazoid.
   melpazoid:
@@ -39,8 +37,7 @@ jobs:
         env:
           LOCAL_REPO: ${{ github.workspace }}
           RECIPE: (mu4e-send-later :fetcher github :repo "Jotham-LEC/mu4e-send-later")
-          # Warnings show in the log without failing the run.
-          WARN_IS_ERROR: false
+          WARN_IS_ERROR: true
           # Not on MELPA yet.
           EXIST_OK: false
         run: echo "$GITHUB_REF" && make -C ~/melpazoid

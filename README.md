@@ -234,12 +234,16 @@ What I looked at before writing this, and why it didn't fit:
 ## Development
 
 ```sh
-make compile   # byte-compile, warnings are errors
-make deps      # install org-msg and package-lint from MELPA into .deps/
+make deps      # install org-msg, package-lint and relint into .deps/
+make check     # all of the below but integration; what CI runs
+make compile   # byte-compile the package and its tests, warnings are errors
+make lint      # checkdoc, package-lint and relint; fails on any warning
+make format    # indent as plain emacs -Q does (format-check only reports)
 make test      # unit tests, against a fake scheduler and a fake send function
 make integration   # real systemd timers, on a queue of its own, and a fake sendmail
-make lint      # checkdoc and package-lint; fails on any warning
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

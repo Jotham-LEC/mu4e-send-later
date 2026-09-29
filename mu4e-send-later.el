@@ -117,14 +117,26 @@ queue for you to retry or cancel from `mu4e-send-later-list'."
   :type '(repeat natnum))
 
 (defcustom mu4e-send-later-variables
-  '(user-mail-address user-full-name mail-host-address
-    sendmail-program mail-specify-envelope-from mail-envelope-from
-    message-sendmail-f-is-evil message-sendmail-envelope-from
+  '(user-mail-address
+    user-full-name
+    mail-host-address
+    sendmail-program
+    mail-specify-envelope-from
+    mail-envelope-from
+    message-sendmail-f-is-evil
+    message-sendmail-envelope-from
     message-sendmail-extra-arguments
-    smtpmail-smtp-server smtpmail-smtp-service smtpmail-smtp-user
-    smtpmail-stream-type smtpmail-local-domain smtpmail-sendto-domain
-    smtpmail-servers-requiring-authorization smtpmail-smtp-extra-args
-    smtpmail-retries auth-sources send-mail-function)
+    smtpmail-smtp-server
+    smtpmail-smtp-service
+    smtpmail-smtp-user
+    smtpmail-stream-type
+    smtpmail-local-domain
+    smtpmail-sendto-domain
+    smtpmail-servers-requiring-authorization
+    smtpmail-smtp-extra-args
+    smtpmail-retries
+    auth-sources
+    send-mail-function)
   "Variables whose values at scheduling time are used when sending.
 The background Emacs doesn't load your init file, so anything your
 `message-send-mail-function' reads must be listed here."
@@ -1039,7 +1051,7 @@ Call ON-EXIT with the exit status when it finishes."
        (format "%d scheduled message(s) failed to send and are waiting in M-x mu4e-send-later-list:\n%s"
                (length failed)
                (mapconcat (lambda (m) (format "  %s — %s" (plist-get m :subject)
-                                             (plist-get m :last-error)))
+                                              (plist-get m :last-error)))
                           failed "\n"))
        :error))
     (mu4e-send-later--report-errors
@@ -1087,7 +1099,7 @@ failed messages are reported."
 (defun mu4e-send-later--systemd-quote (arg)
   "Quote ARG for a systemd ExecStart line."
   (concat "\"" (replace-regexp-in-string
-                "[\"\\\\%$]" (lambda (c) (if (equal c "%") "%%" (if (equal c "$") "$$" (concat "\\" c))))
+                "[\"\\%$]" (lambda (c) (if (equal c "%") "%%" (if (equal c "$") "$$" (concat "\\" c))))
                 arg t t)
           "\""))
 
