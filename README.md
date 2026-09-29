@@ -216,9 +216,10 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 - A send already under way in the background carries on if you quit Emacs.
 - Upgrades. Pending timers and the login job name the Emacs executable and the
   directory this package was loaded from, and an upgrade can move either. The
-  startup check re-arms the timers each time Emacs starts, and warns if the
-  login job points somewhere stale; re-run `mu4e-send-later-install-login-job`
-  then. On Nix the running Emacs's store path can be garbage-collected after an
+  timers are re-armed when the new version is loaded with the mode on, as
+  package.el does when it upgrades, and by the startup check each time Emacs
+  starts, which also warns if the login job points somewhere stale; re-run
+  `mu4e-send-later-install-login-job` then. On Nix the running Emacs's store path can be garbage-collected after an
   upgrade, so set `mu4e-send-later-emacs-program` to a path that survives it.
 - Timers are named after the queue directory since 0.3.0. systemd timers armed
   by 0.2 keep their old names; they fire once, send whatever is due, and go

@@ -386,10 +386,15 @@ Also logs it, so it isn't lost where no notification daemon runs."
                     "set `mu4e-send-later-emacs-program'")))
     emacs))
 
+(defvar mu4e-send-later--library-file nil
+  "The file this library was last loaded from, if it was loaded from one.")
+(setq mu4e-send-later--library-file (and load-file-name (expand-file-name load-file-name)))
+
 (defun mu4e-send-later--library-dir ()
   "Directory this library was loaded from."
   (file-name-directory
-   (or (locate-library "mu4e-send-later")
+   (or mu4e-send-later--library-file
+       (locate-library "mu4e-send-later")
        (signal 'mu4e-send-later-error '("Can't find mu4e-send-later on `load-path'")))))
 
 (defun mu4e-send-later--command (function &rest args)
@@ -1593,6 +1598,12 @@ TIME is as for `mu4e-send-later'."
   "Show the raw message at point."
   (interactive)
   (view-file (expand-file-name "message" (mu4e-send-later--item-dir (mu4e-send-later--id-at-point)))))
+
+;; Loaded again with the mode on, as when package.el upgrades it, maybe
+;; from a new directory: the wake-ups name the old one, so re-make them.
+(when mu4e-send-later-mode
+  (mu4e-send-later--report-errors
+   (lambda () (mu4e-send-later--with-lock (mu4e-send-later--arm)))))
 
 (provide 'mu4e-send-later)
 ;;; mu4e-send-later.el ends here

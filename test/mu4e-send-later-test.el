@@ -1155,6 +1155,46 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
         (mu4e-send-later-check))
       (should (equal msl-test--armed (list (plist-get (mu4e-send-later--meta id) :due)))))))
 
+;; package.el upgrades a package by loading it again from a new
+;; directory, and the old one goes; wake-ups naming it would then fail.
+(ert-deftest msl-test-loading-again-rearms-from-the-new-directory ()
+  (msl-test--with-queue
+    (msl-test--schedule 3600 "Upgraded")
+    (let* ((root (make-temp-file "msl-upgrade-" t))
+           (old (expand-file-name "mu4e-send-later-0.3.0/" root))
+           (new (expand-file-name "mu4e-send-later-0.3.1/" root))
+           (source (expand-file-name "mu4e-send-later.el" (mu4e-send-later--library-dir))))
+      (unwind-protect
+          (progn
+            (dolist (dir (list old new))
+              (make-directory dir)
+              (copy-file source dir))
+            (with-temp-buffer
+              ;; In a fresh Emacs, with this library loaded from OLD and the
+              ;; mode on, NEW is loaded; a stand-in backend says what the
+              ;; wake-up would run.
+              (should
+               (zerop
+                (call-process
+                 (expand-file-name invocation-name invocation-directory)
+                 nil t nil "-Q" "--batch" "-L" old "-l" "mu4e-send-later"
+                 "--eval"
+                 (format "%S"
+                         `(progn
+                            (advice-add 'mu4e-send-later--backend :override
+                                        (lambda () 'probe))
+                            (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql probe))))
+                            (cl-defmethod mu4e-send-later--backend-arm ((_ (eql probe)) _time)
+                              (princ (format "armed from %s\n"
+                                             (mu4e-send-later--library-dir))))
+                            (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql probe)) _time)
+                              t)
+                            (setq mu4e-send-later-directory ,(mu4e-send-later--dir)
+                                  mu4e-send-later-mode t)
+                            (load ,(expand-file-name "mu4e-send-later.el" new) nil t))))))
+              (should (equal (buffer-string) (format "armed from %s\n" new)))))
+        (delete-directory root t)))))
+
 (ert-deftest msl-test-current-login-job-is-not-reported ()
   (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
 
