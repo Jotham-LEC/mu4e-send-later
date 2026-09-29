@@ -1681,6 +1681,13 @@ TIME is as for `mu4e-send-later'."
   (interactive)
   (view-file (expand-file-name "message" (mu4e-send-later--item-dir (mu4e-send-later--id-at-point)))))
 
+(defun mu4e-send-later-unload-function ()
+  "Stop watching the queue, for `unload-feature'."
+  (mu4e-send-later-mode -1)
+  (mu4e-send-later--backend-disarm 'emacs)
+  ;; And carry on unloading as usual.
+  nil)
+
 ;; Loaded again with the mode on, as when package.el upgrades it, maybe
 ;; from a new directory: the wake-ups name the old one, so re-make them.
 (when mu4e-send-later-mode

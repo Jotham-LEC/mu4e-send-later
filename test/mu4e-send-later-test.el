@@ -1754,6 +1754,33 @@ file it removes."
         (mu4e-send-later-mode -1)
         (when mu4e-send-later--sync-timer (cancel-timer mu4e-send-later--sync-timer))))))
 
+;; Left behind, the watch on the queue would call a function no longer
+;; defined each time the queue changes.
+(ert-deftest msl-test-unloading-leaves-no-watch-or-timer ()
+  (msl-test--with-queue
+    (with-temp-buffer
+      ;; In a fresh Emacs, so this one keeps the package.
+      (should
+       (zerop
+        (call-process
+         (expand-file-name invocation-name invocation-directory)
+         nil '(t nil) nil "-Q" "--batch" "--eval" "(setq load-prefer-newer t)"
+         "-L" (mu4e-send-later--library-dir) "-l" "mu4e-send-later"
+         "--eval"
+         (format "%S"
+                 `(progn
+                    (setq mu4e-send-later-directory ,(mu4e-send-later--dir)
+                          mu4e-send-later-backend 'emacs)
+                    (mu4e-send-later-mode 1)
+                    (mu4e-send-later--backend-arm 'emacs (+ (floor (float-time)) 3600))
+                    (mu4e-send-later--queue-event
+                     (list nil 'created (mu4e-send-later--dir "1790000000-abcdef")))
+                    (unload-feature 'mu4e-send-later t)
+                    (princ (format "watches %d timers %d\n"
+                                   (hash-table-count file-notify-descriptors)
+                                   (length timer-list))))))))
+      (should (equal (buffer-string) "watches 0 timers 0\n")))))
+
 (ert-deftest msl-test-not-a-scheduled-message ()
   (msl-test--with-queue
     (msl-test--with-mu4e
