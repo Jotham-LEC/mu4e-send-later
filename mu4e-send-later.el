@@ -893,6 +893,8 @@ it is read with `org-read-date' and confirmed."
           (message-send-mail-partially-limit nil)
           ;; Otherwise it adds X-Message-SMTP-Method, which sends now.
           (message-server-alist nil)
+          ;; Gnus's agent, set once Gnus starts, would take the message.
+          (message-send-mail-real-function nil)
           (draft (current-buffer)))
       (condition-case err
           (message-send-and-exit)

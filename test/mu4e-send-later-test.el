@@ -489,6 +489,16 @@ Skips the test where org-msg isn't installed, except on CI."
           (should (equal (mu4e-send-later--ids) (list id)))
           (should-not (string-match-p "X-Message-SMTP-Method" (msl-test--stored id))))))))
 
+;; Gnus, once started, has message.el send through its agent, which
+;; queues the mail in Gnus instead while unplugged.
+(ert-deftest msl-test-gnus-agent-is-bypassed ()
+  (msl-test--with-queue
+    (let* ((sent-by-gnus nil)
+           (message-send-mail-real-function (lambda () (setq sent-by-gnus t)))
+           (id (car (msl-test--schedule 3600))))
+      (should-not sent-by-gnus)
+      (should (equal (mu4e-send-later--ids) (list id))))))
+
 (ert-deftest msl-test-preflight-fails-on-an-unconfigured-send-function ()
   (msl-test--with-queue
     (dolist (send-function '("message--default-send-mail-function" "sendmail-query-once"))
