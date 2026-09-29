@@ -797,13 +797,52 @@ Each message it reads is appended to DIR/sent, followed by a line
       (should (eq 'ran (mu4e-send-later--with-lock 'ran)))
       (should-not (file-exists-p lock)))))
 
-(ert-deftest msl-test-old-lock-of-a-live-owner-is-not-stale ()
+;; Our own PID stands in for another live process on this host.
+(defun msl-test--own-start ()
+  "When this Emacs started."
+  (alist-get 'start (process-attributes (emacs-pid))))
+
+(ert-deftest msl-test-live-local-owners-lock-is-never-broken ()
   (msl-test--with-queue
-    ;; Our own PID stands in for another live process on this host.
-    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name) 3600)))
+    ;; Taken after we started, as by us: however old it looks, it stays.
+    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name)))
+          (mu4e-send-later--lock-stale-after 0))
+      (set-file-times lock (time-add (msl-test--own-start) 1))
+      (sleep-for 0.01)
+      (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
       (msl-test--with-lock-deadline
         (should-error (mu4e-send-later--with-lock t) :type 'mu4e-send-later-error))
       (should (file-exists-p (expand-file-name "owner" lock))))))
+
+(ert-deftest msl-test-fresh-lock-of-a-dead-local-owner-is-broken ()
+  (msl-test--with-queue
+    (let ((lock (msl-test--hold-lock msl-test--dead-pid (system-name) 60)))
+      (should (eq 'ran (mu4e-send-later--with-lock 'ran)))
+      (should-not (file-exists-p lock)))))
+
+;; The owner died, and a later process has its PID.
+(ert-deftest msl-test-lock-from-before-its-owner-started-is-broken ()
+  (msl-test--with-queue
+    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name))))
+      (set-file-times lock (time-subtract (msl-test--own-start) 120))
+      (should (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+      ;; But not for a small difference, which can be the clocks.
+      (set-file-times lock (time-subtract (msl-test--own-start) 30))
+      (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner))))))
+
+(ert-deftest msl-test-lock-of-an-owner-that-cant-be-asked-waits-to-be-old ()
+  (msl-test--with-queue
+    (dolist (host '("elsewhere" nil))
+      (let ((lock (if host
+                      (msl-test--hold-lock msl-test--dead-pid host 60)
+                    ;; No owner written, as by 0.2.
+                    (make-directory (mu4e-send-later--lock-dir) t)
+                    (set-file-times (mu4e-send-later--lock-dir) (time-subtract nil 60))
+                    (mu4e-send-later--lock-dir))))
+        (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+        (set-file-times lock (time-subtract nil 3600))
+        (should (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+        (delete-directory lock t)))))
 
 (ert-deftest msl-test-lock-writes-its-owner-and-keeps-others-locks ()
   (msl-test--with-queue

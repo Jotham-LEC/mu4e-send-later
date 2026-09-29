@@ -249,7 +249,13 @@ it, so one bad item doesn't hold up the others."
     (or (plist-get meta :next-attempt) (plist-get meta :due))))
 
 (defconst mu4e-send-later--lock-stale-after 900
-  "Seconds after which a lock whose owner can't be seen alive is broken.")
+  "Seconds after which a lock whose owner can't be asked is broken.")
+
+(defconst mu4e-send-later--pid-reuse-margin 60
+  "Seconds a lock's owner may seem to have started after taking it.
+A process that started later than that is a newer one, reusing the
+PID of the owner, which is gone.  The margin allows for the clock
+the start time is worked out from not agreeing with file times.")
 
 (defun mu4e-send-later--lock-dir ()
   "The directory whose existence is the queue lock."
@@ -264,17 +270,25 @@ it, so one bad item doesn't hold up the others."
 
 (defun mu4e-send-later--lock-stale-p (owner)
   "Non-nil if the lock, held by OWNER, was left behind by a dead sender.
-It must be old, and if OWNER is a process on this host, not running."
-  (let ((mtime (file-attribute-modification-time
-                (file-attributes (mu4e-send-later--lock-dir)))))
-    (and mtime
-         (> (float-time (time-since mtime)) mu4e-send-later--lock-stale-after)
-         (pcase (and owner (split-string owner " "))
-           (`(,pid ,host . ,_)
-            (not (and (equal host (system-name))
-                      (process-attributes (string-to-number pid)))))
-           ;; No owner to ask, as with a lock from before owners were written.
-           (_ t)))))
+An owner on this host is asked directly: the lock is stale as soon as
+that process is gone, or is a newer one that reused its PID, and never
+while it runs.  Otherwise the lock must be old."
+  (let* ((mtime (file-attribute-modification-time
+                 (file-attributes (mu4e-send-later--lock-dir))))
+         (old (and mtime (> (float-time (time-since mtime))
+                            mu4e-send-later--lock-stale-after))))
+    (pcase (and mtime owner (split-string owner " "))
+      ((and `(,pid ,(pred (equal (system-name))) . ,_)
+            ;; Unless processes can't be seen here at all.
+            (guard (process-attributes (emacs-pid))))
+       (let ((attributes (process-attributes (string-to-number pid))))
+         (or (null attributes)
+             (let ((start (alist-get 'start attributes)))
+               (and start
+                    (time-less-p (time-add mtime mu4e-send-later--pid-reuse-margin)
+                                 start))))))
+      ;; An owner on another host, or none written, as by 0.2.
+      (_ old))))
 
 (defun mu4e-send-later--touch-lock ()
   "Show the lock is still in use, so it isn't taken for stale."
