@@ -165,6 +165,23 @@ Skips the test where org-msg isn't installed, except on CI."
         (goto-char (point-min))
         (should-not (search-forward (encode-coding-string "ünïcode" 'utf-8) nil t))))))
 
+(ert-deftest msl-test-time-need-not-be-a-whole-number ()
+  (msl-test--with-queue
+    (let* ((time (+ (float-time) 3600.7))
+           (buffer (msl-test--draft "Float"))
+           (id (with-current-buffer buffer
+                 (let ((message-interactive t))
+                   (mu4e-send-later time)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (should (eql (plist-get (mu4e-send-later--meta id) :due) (floor time)))
+      (should (equal msl-test--armed (list (floor time))))
+      ;; Nor when rescheduling, or given as a Lisp timestamp.
+      (msl-test--in-list "Float" (lambda () (mu4e-send-later-reschedule (+ time 60.5))))
+      (should (eql (plist-get (mu4e-send-later--meta id) :due) (floor (+ time 60.5))))
+      (msl-test--in-list "Float" (lambda () (mu4e-send-later-reschedule
+                                             (time-convert (+ time 120) 'list))))
+      (should (eql (plist-get (mu4e-send-later--meta id) :due) (floor (+ time 120)))))))
+
 (ert-deftest msl-test-schedule-org-msg-html-draft ()
   (msl-test--with-queue
     (let ((buffer (msl-test--org-msg-draft '(utf-8 html) "This is *bold*."))

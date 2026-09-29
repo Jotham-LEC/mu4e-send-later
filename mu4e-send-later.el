@@ -781,6 +781,11 @@ Called where `message-send-mail-function' would be.  Return the new ID."
                           (format-time-string "%F %T" time) (plist-get meta :subject))
     id))
 
+(defun mu4e-send-later--seconds (time)
+  "TIME, a Lisp time value, as a whole Unix time in seconds.
+The queue only stores those."
+  (floor (float-time time)))
+
 (defun mu4e-send-later--read-time ()
   "Ask when to send, confirming what the answer was read as."
   (require 'org)
@@ -802,13 +807,14 @@ Called where `message-send-mail-function' would be.  Return the new ID."
 ;;;###autoload
 (defun mu4e-send-later (time)
   "Send the current draft at TIME instead of now.
-TIME is a Unix time in seconds; interactively it is read with
-`org-read-date' and confirmed."
+TIME is a Unix time in seconds, or any Lisp time value; interactively
+it is read with `org-read-date' and confirmed."
   (interactive (progn
                  (mu4e-send-later--check-draft)
                  (list (mu4e-send-later--read-time))))
   (mu4e-send-later--check-draft)
-  (let ((send-function message-send-mail-function)
+  (let ((time (mu4e-send-later--seconds time))
+        (send-function message-send-mail-function)
         (mu4e-send-later--draft (mu4e-send-later--capture-draft))
         (id nil))
     (unless (and (symbolp send-function) (fboundp send-function))
@@ -1511,9 +1517,11 @@ Schedule it again with `mu4e-send-later' once edited."
 
 ;;;###autoload
 (defun mu4e-send-later-reschedule (time)
-  "Move the message at point to TIME."
+  "Move the message at point to TIME.
+TIME is as for `mu4e-send-later'."
   (interactive (progn (mu4e-send-later--id-at-point)
                       (list (mu4e-send-later--read-time))))
+  (setq time (mu4e-send-later--seconds time))
   (mu4e-send-later--update (mu4e-send-later--id-at-point)
                            (lambda (meta)
                              (thread-first meta
