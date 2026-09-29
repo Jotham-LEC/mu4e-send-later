@@ -447,6 +447,36 @@ Skips the test where org-msg isn't installed, except on CI."
                                                "message--default-send-mail-function" ""
                                                "smtpmail-send-it"))))))
 
+;; As in a checkout that was updated but not recompiled.
+(ert-deftest msl-test-background-emacs-loads-the-newer-source ()
+  (let* ((dir (make-temp-file "msl-lib-" t))
+         (source (expand-file-name "mu4e-send-later.el" dir))
+         (real (with-temp-buffer
+                 (insert-file-contents
+                  (expand-file-name "mu4e-send-later.el" (mu4e-send-later--library-dir)))
+                 (buffer-string))))
+    (unwind-protect
+        (progn
+          ;; An old version, compiled, whose preflight says something else.
+          (with-temp-file source
+            (insert (string-replace "mu4e-send-later: preflight ok"
+                                    "mu4e-send-later: preflight stale"
+                                    real)))
+          (require 'bytecomp)
+          (let ((byte-compile-warnings nil))
+            (should (byte-compile-file source)))
+          (set-file-times (concat source "c") (time-subtract nil 60))
+          (with-temp-file source (insert real))
+          (cl-letf (((symbol-function 'mu4e-send-later--library-dir)
+                     (lambda () (file-name-as-directory dir))))
+            (let ((output (mu4e-send-later--backend-run
+                           'emacs (mu4e-send-later--command
+                                   'mu4e-send-later-batch-preflight
+                                   "message-send-mail-with-sendmail" ""))))
+              (should (string-match-p "preflight ok" output))
+              (should-not (string-match-p "stale" output)))))
+      (delete-directory dir t))))
+
 (ert-deftest msl-test-sendmail-program-is-made-absolute ()
   (msl-test--with-queue
     (let ((mu4e-send-later-variables '(sendmail-program))

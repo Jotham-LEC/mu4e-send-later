@@ -400,6 +400,8 @@ Also logs it, so it isn't lost where no notification daemon runs."
 (defun mu4e-send-later--command (function &rest args)
   "Command line running FUNCTION with ARGS in a background Emacs."
   (append (list (mu4e-send-later--emacs) "--batch" "-Q"
+                ;; A stale .elc next to the source would otherwise win.
+                "--eval" "(setq load-prefer-newer t)"
                 "-L" (mu4e-send-later--library-dir)
                 "-l" "mu4e-send-later"
                 "-f" (symbol-name function)
