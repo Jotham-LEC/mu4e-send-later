@@ -907,6 +907,40 @@ Each message it reads is appended to DIR/sent, followed by a line
                (cadr (should-error (mu4e-send-later--update id #'identity)
                                    :type 'user-error)))))))
 
+(defun msl-test--in-list (subject fn)
+  "Call FN on the message with SUBJECT in the list."
+  (mu4e-send-later-list)
+  (unwind-protect
+      (with-current-buffer "*mu4e-send-later*"
+        (goto-char (point-min))
+        (search-forward subject)
+        (funcall fn))
+    (kill-buffer "*mu4e-send-later*")))
+
+;; A sender that died mid-send leaves the item `sending'; it may have
+;; gone out, so neither sending nor rescheduling it is done unasked.
+(ert-deftest msl-test-send-now-and-reschedule-refuse-an-interrupted-send ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Interrupted")))
+          (later (+ (floor (float-time)) 7200)))
+      (cl-letf (((symbol-function 'mu4e-send-later--flush-async) #'ignore))
+        (dolist (command (list #'mu4e-send-later-send-now
+                               (lambda () (mu4e-send-later-reschedule later))))
+          (mu4e-send-later--set-meta
+           id (plist-put (mu4e-send-later--meta id) :state 'sending))
+          (should (string-match-p
+                   "may have been sent"
+                   (cadr (should-error (msl-test--in-list "Interrupted" command)
+                                       :type 'user-error))))
+          (let ((meta (mu4e-send-later--meta id)))
+            (should (eq (plist-get meta :state) 'failed))
+            (should-not (eql (plist-get meta :due) later)))))
+      ;; Marked failed, doing it again is a choice, and done.
+      (msl-test--in-list "Interrupted" (lambda () (mu4e-send-later-reschedule later)))
+      (should (eq (plist-get (mu4e-send-later--meta id) :state) 'pending))
+      (should (eql (plist-get (mu4e-send-later--meta id) :due) later))
+      (should-not msl-test--sent))))
+
 (ert-deftest msl-test-flush-keeps-the-lock-fresh ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600)))

@@ -1424,12 +1424,22 @@ background send got to it first."
   (mu4e-send-later--changed))
 
 (defun mu4e-send-later--update (id fn)
-  "Under the lock, replace ID's metadata with FN applied to it, then re-arm."
+  "Under the lock, replace ID's metadata with FN applied to it, then re-arm.
+Refuse if a send of ID was interrupted, as it may have gone out."
   (mu4e-send-later--with-lock
-    (mu4e-send-later--set-meta
-     id (funcall fn (condition-case nil
-                        (mu4e-send-later--meta id)
-                      (file-missing (mu4e-send-later--gone)))))
+    (let ((meta (condition-case nil
+                    (mu4e-send-later--meta id)
+                  (file-missing (mu4e-send-later--gone)))))
+      ;; Under the lock no one is sending it, so a sender died doing so.
+      ;; Mark it as a flush would, so that doing it again is a choice.
+      (when (eq (plist-get meta :state) 'sending)
+        (mu4e-send-later--set-meta
+         id (thread-first meta
+                          (plist-put :state 'failed)
+                          (plist-put :last-error mu4e-send-later--interrupted-error)))
+        (mu4e-send-later--changed)
+        (user-error "Its send was interrupted, so it may have been sent; check, then do this again if you still want to"))
+      (mu4e-send-later--set-meta id (funcall fn meta)))
     (mu4e-send-later--arm))
   (mu4e-send-later--changed))
 
