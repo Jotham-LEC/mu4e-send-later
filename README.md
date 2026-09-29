@@ -149,8 +149,11 @@ At scheduling time, each of these is an error, and the draft stays open:
 
 - no usable scheduler, or the timer wasn't there after creating it;
 - the Emacs executable the timer would run doesn't exist;
-- a trial run of the background Emacs, in the scheduler's own environment,
-  can't find your send function or `sendmail-program`;
+- a trial run of the background Emacs can't find your send function or
+  `sendmail-program`. With systemd it runs as a user service, in the
+  scheduler's own environment. With launchd it runs from Emacs, in Emacs's
+  environment; the jobs themselves get Emacs's `PATH` but none of its other
+  variables;
 - the send function would ask how to send (`sendmail-query-once`, see above);
 - the draft has an `X-Message-SMTP-Method` header, which makes message.el send
   it right away through the method it names. That isn't supported yet; take the

@@ -537,9 +537,27 @@ such as the one the integration test uses."
                    (decoded-time-month d) (decoded-time-day d)
                    (decoded-time-hour d) (decoded-time-minute d)))
        "  <key>RunAtLoad</key><true/>\n")
+     "  <key>EnvironmentVariables</key>\n  <dict>\n"
+     ;; launchd gives jobs a PATH of only the system's directories, too
+     ;; few for a sendmail's own helpers (msmtp's passwordeval, say).
+     (when-let* ((path (getenv "PATH")))
+       (concat "    <key>PATH</key><string>" (funcall esc path) "</string>\n"))
+     "    <key>MU4E_SEND_LATER_JOB</key><string>" (funcall esc label) "</string>\n"
+     "  </dict>\n"
      "  <key>StandardErrorPath</key><string>"
      (funcall esc (mu4e-send-later--dir "launchd.log")) "</string>\n"
      "</dict>\n</plist>\n")))
+
+(defun mu4e-send-later--launchd-running-job ()
+  "Label of the launchd job running this Emacs, or nil.
+The jobs this package makes say in MU4E_SEND_LATER_JOB; launchd's own
+XPC_SERVICE_NAME, all that older ones have, isn't always the label."
+  (or (getenv "MU4E_SEND_LATER_JOB") (getenv "XPC_SERVICE_NAME")))
+
+(defun mu4e-send-later--launchd-loaded-p (label)
+  "Non-nil if launchd has the job LABEL loaded."
+  (mu4e-send-later--succeeds-p
+   "launchctl" "print" (concat (mu4e-send-later--launchd-domain) "/" label)))
 
 (defun mu4e-send-later--launchd-load (label xml)
   "Write LaunchAgent LABEL with contents XML and load it."
@@ -547,12 +565,20 @@ such as the one the integration test uses."
     (make-directory (file-name-directory file) t)
     (let ((coding-system-for-write 'utf-8-unix))
       (write-region xml nil file nil 'silent))
-    ;; As in disarming, booting out the job running us would kill us.
-    (unless (equal label (getenv "XPC_SERVICE_NAME"))
-      (ignore-errors
-        (mu4e-send-later--call "launchctl" "bootout"
-                               (concat (mu4e-send-later--launchd-domain) "/" label))))
-    (mu4e-send-later--call "launchctl" "bootstrap" (mu4e-send-later--launchd-domain) file)))
+    ;; As in disarming, booting out the job running us would kill us;
+    ;; it is loaded, so leave it be.
+    (unless (equal label (mu4e-send-later--launchd-running-job))
+      ;; Loading a loaded job fails, so replace it: loading is idempotent.
+      (when (mu4e-send-later--launchd-loaded-p label)
+        (ignore-errors
+          (mu4e-send-later--call "launchctl" "bootout"
+                                 (concat (mu4e-send-later--launchd-domain) "/" label)))
+        ;; In case bootout returns before the job is gone.
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (mu4e-send-later--launchd-loaded-p label)
+                      (< (float-time) deadline))
+            (sleep-for 0.1))))
+      (mu4e-send-later--call "launchctl" "bootstrap" (mu4e-send-later--launchd-domain) file))))
 
 (cl-defmethod mu4e-send-later--backend-arm ((_ (eql launchd)) time)
   "Wake up to run the queue at TIME, with a launchd job."
@@ -562,10 +588,10 @@ such as the one the integration test uses."
             label (mu4e-send-later--command 'mu4e-send-later-batch-flush) time))))
 
 ;; Booting out the job that is running us would kill us, so the current
-;; one (launchd names it in XPC_SERVICE_NAME) only loses its plist.
+;; one only loses its plist, and unloads itself once it's done.
 (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql launchd)))
   "Cancel every pending launchd job wake-up."
-  (let ((self (getenv "XPC_SERVICE_NAME"))
+  (let ((self (mu4e-send-later--launchd-running-job))
         (dir (mu4e-send-later--launchd-agents-dir)))
     (dolist (file (and (file-directory-p dir)
                        (directory-files dir t (concat "\\`" (regexp-quote mu4e-send-later--launchd-prefix)
@@ -580,9 +606,23 @@ such as the one the integration test uses."
 
 (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql launchd)) time)
   "Non-nil if a launchd job wake-up is set for TIME."
-  (mu4e-send-later--succeeds-p
-   "launchctl" "print" (concat (mu4e-send-later--launchd-domain) "/"
-                               (mu4e-send-later--launchd-label time))))
+  (mu4e-send-later--launchd-loaded-p (mu4e-send-later--launchd-label time)))
+
+(defun mu4e-send-later--launchd-retire ()
+  "Unload the launchd wake-up running us, if one is, now it has fired.
+Otherwise it stays loaded until you log out, set to fire again on the
+same day next year, and its plist, if a failure kept re-arming from
+removing it, would load it again at login.  launchd ends us as it
+unloads us, so this comes last."
+  (let ((label (mu4e-send-later--launchd-running-job)))
+    (when (and label
+               (string-match-p (concat "\\`" (regexp-quote mu4e-send-later--launchd-prefix)
+                                       "\\." (mu4e-send-later--queue-tag) "\\.[0-9]+\\'")
+                               label))
+      (ignore-errors (delete-file (mu4e-send-later--launchd-plist-file label)))
+      (ignore-errors
+        (mu4e-send-later--call "launchctl" "bootout"
+                               (concat (mu4e-send-later--launchd-domain) "/" label))))))
 
 (cl-defmethod mu4e-send-later--backend-run ((_ (eql launchd)) command)
   "Run COMMAND directly and return its output."
@@ -1025,6 +1065,7 @@ Schedule a retry, or once they are used up, mark it failed."
                             (error-message-string err))
                     t)
                    2))))
+    (mu4e-send-later--launchd-retire)
     (kill-emacs status)))
 
 (defun mu4e-send-later-batch-preflight ()

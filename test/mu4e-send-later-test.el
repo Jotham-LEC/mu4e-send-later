@@ -1198,22 +1198,148 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
 (ert-deftest msl-test-current-login-job-is-not-reported ()
   (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
 
+(defvar msl-test--launchd nil
+  "Jobs the fake launchd has loaded: (LABEL . PRINTS-LEFT).
+PRINTS-LEFT is nil, or once booted out, the number of times it still
+shows in `launchctl print'.")
+(defvar msl-test--launchctl nil "Calls to the fake launchctl, oldest first.")
+(defvar msl-test--bootout-lag 0 "How long a booted-out job still shows, in prints.")
+
+(defun msl-test--launchctl (args)
+  "Run the fake launchctl with ARGS, as launchd would; return its exit status."
+  (setq msl-test--launchctl (append msl-test--launchctl (list args)))
+  (let* ((target (car (last args)))
+         (label (if (equal (car args) "bootstrap")
+                    (file-name-base target)
+                  (car (last (split-string target "/")))))
+         (job (assoc label msl-test--launchd)))
+    (pcase (car args)
+      ("print"
+       (cond ((not job) 113)
+             ((not (cdr job)) 0)
+             ((zerop (cdr job))
+              (setq msl-test--launchd (delq job msl-test--launchd))
+              113)
+             (t (setcdr job (1- (cdr job))) 0)))
+      ;; As launchd does, refuse to load what is loaded.
+      ("bootstrap" (cond (job 5)
+                         ((not (file-exists-p target)) 2)
+                         (t (push (list label) msl-test--launchd) 0)))
+      ("bootout" (cond ((not job) 113)
+                       ((zerop msl-test--bootout-lag)
+                        (setq msl-test--launchd (delq job msl-test--launchd))
+                        0)
+                       (t (setcdr job msl-test--bootout-lag) 0))))))
+
+(defmacro msl-test--with-fake-launchd (&rest body)
+  "Run BODY with a fake launchctl, and LaunchAgents in a temporary directory.
+Not in a launchd job, to begin with."
+  (declare (indent 0) (debug t))
+  `(let ((agents (make-temp-file "msl-agents-" t))
+         (msl-test--launchd nil)
+         (msl-test--launchctl nil)
+         (msl-test--bootout-lag 0)
+         (process-environment (append '("MU4E_SEND_LATER_JOB" "XPC_SERVICE_NAME")
+                                      process-environment)))
+     (cl-letf* ((call (symbol-function 'mu4e-send-later--call))
+                (succeeds (symbol-function 'mu4e-send-later--succeeds-p))
+                ((symbol-function 'mu4e-send-later--launchd-agents-dir)
+                 (lambda () (file-name-as-directory agents)))
+                ((symbol-function 'mu4e-send-later--call)
+                 (lambda (program &rest args)
+                   (if (not (equal program "launchctl"))
+                       (apply call program args)
+                     (let ((status (msl-test--launchctl args)))
+                       (unless (zerop status)
+                         (signal 'mu4e-send-later-backend-error
+                                 (list (format "launchctl exited with %d" status))))
+                       ""))))
+                ((symbol-function 'mu4e-send-later--succeeds-p)
+                 (lambda (program &rest args)
+                   (if (equal program "launchctl")
+                       (zerop (msl-test--launchctl args))
+                     (apply succeeds program args)))))
+       (unwind-protect (progn ,@body)
+         (delete-directory agents t)))))
+
+(defun msl-test--in-launchd-job (label)
+  "An environment like that of the launchd job LABEL."
+  (cons (concat "MU4E_SEND_LATER_JOB=" label) process-environment))
+
+(ert-deftest msl-test-launchd-plist-gives-the-job-path-and-its-label ()
+  (let* ((process-environment (cons "PATH=/opt/a&b/bin:/usr/bin" process-environment))
+         (xml (mu4e-send-later--plist-xml "a.b" '("/x/emacs") 1790000000)))
+    (should (string-match-p (concat "<key>EnvironmentVariables</key>\n  <dict>\n"
+                                    "    <key>PATH</key><string>/opt/a&amp;b/bin:/usr/bin</string>\n"
+                                    "    <key>MU4E_SEND_LATER_JOB</key><string>a.b</string>\n"
+                                    "  </dict>\n")
+                            xml))))
+
+(ert-deftest msl-test-launchd-arming-twice-is-fine ()
+  (msl-test--with-fake-launchd
+    (let ((label (mu4e-send-later--launchd-label 1790000000)))
+      (dolist (lag '(0 3))
+        (setq msl-test--bootout-lag lag)
+        (dotimes (_ 2)
+          (mu4e-send-later--backend-arm 'launchd 1790000000)
+          (should (mu4e-send-later--backend-armed-p 'launchd 1790000000))
+          (should (equal (mapcar #'car msl-test--launchd) (list label))))))))
+
 (ert-deftest msl-test-launchd-load-never-boots-out-the-running-job ()
-  (let* ((agents (make-temp-file "msl-agents-" t))
-         (label (mu4e-send-later--launchd-label 1790000000))
-         (process-environment (cons (concat "XPC_SERVICE_NAME=" label) process-environment))
-         (calls nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'mu4e-send-later--launchd-agents-dir)
-                   (lambda () (file-name-as-directory agents)))
-                  ((symbol-function 'mu4e-send-later--call)
-                   (lambda (&rest args) (push (nth 1 args) calls) "")))
-          (mu4e-send-later--launchd-load label "<plist/>")
-          (should (equal calls '("bootstrap")))
-          (setq calls nil)
-          (mu4e-send-later--launchd-load (concat label "0") "<plist/>")
-          (should (equal calls '("bootstrap" "bootout"))))
-      (delete-directory agents t))))
+  (msl-test--with-fake-launchd
+    (let ((label (mu4e-send-later--launchd-label 1790000000)))
+      (mu4e-send-later--backend-arm 'launchd 1790000000)
+      (setq msl-test--launchctl nil)
+      ;; Arming it again from inside it, as the login job might.
+      (let ((process-environment (msl-test--in-launchd-job label)))
+        (mu4e-send-later--backend-arm 'launchd 1790000000)
+        (should-not msl-test--launchctl)
+        ;; An older job only named itself in launchd's variable.
+        (let ((process-environment (cons (concat "XPC_SERVICE_NAME=" label)
+                                         process-environment)))
+          (setenv "MU4E_SEND_LATER_JOB")
+          (mu4e-send-later--backend-arm 'launchd 1790000000)
+          (should-not msl-test--launchctl)))
+      (should (equal (mapcar #'car msl-test--launchd) (list label))))))
+
+(ert-deftest msl-test-launchd-rearming-keeps-one-job ()
+  (msl-test--with-queue
+    (msl-test--with-fake-launchd
+      (let* ((first (car (msl-test--schedule 3600 "First")))
+             (due (plist-get (mu4e-send-later--meta first) :due)))
+        (msl-test--schedule 7200 "Second")
+        (cl-letf (((symbol-function 'mu4e-send-later--backend) (lambda () 'launchd)))
+          (dotimes (_ 2)
+            (should (eql (mu4e-send-later--arm) due))
+            (should (equal (mapcar #'car msl-test--launchd)
+                           (list (mu4e-send-later--launchd-label due))))
+            (should (equal (directory-files agents nil "\\.plist\\'")
+                           (list (concat (mu4e-send-later--launchd-label due) ".plist"))))))))))
+
+;; A calendar job has no year: loaded, it would fire again next year.
+(ert-deftest msl-test-launchd-job-unloads-itself-once-it-has-run ()
+  (msl-test--with-queue
+    (msl-test--with-fake-launchd
+      (let* ((label (mu4e-send-later--launchd-label 1790000000))
+             (login (concat mu4e-send-later--launchd-prefix ".login"))
+             (flush (lambda (job)
+                      (let ((process-environment (msl-test--in-launchd-job job))
+                            (command-line-args-left (list (mu4e-send-later--dir))))
+                        (cl-letf (((symbol-function 'kill-emacs)
+                                   (lambda (&optional status) (throw 'exit status))))
+                          (catch 'exit (mu4e-send-later-batch-flush)))))))
+        (dolist (job (list label login))
+          (mu4e-send-later--launchd-load job (mu4e-send-later--plist-xml job '("/x/emacs"))))
+        (setq msl-test--launchctl nil)
+        (should (eql 0 (funcall flush label)))
+        (should (equal msl-test--launchctl
+                       (list (list "bootout" (concat (mu4e-send-later--launchd-domain) "/" label)))))
+        (should-not (file-exists-p (mu4e-send-later--launchd-plist-file label)))
+        ;; The login job is for every login.
+        (setq msl-test--launchctl nil)
+        (should (eql 0 (funcall flush login)))
+        (should-not msl-test--launchctl)
+        (should (file-exists-p (mu4e-send-later--launchd-plist-file login)))))))
 
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
