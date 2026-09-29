@@ -346,6 +346,29 @@ Skips the test where org-msg isn't installed, except on CI."
       (should (string-match-p "no scheduler" (nth 1 (car msl-test--notified))))
       (should (nth 2 (car msl-test--notified))))))
 
+;; As when systemd-run hangs and you press C-g.
+(ert-deftest msl-test-quit-while-arming-takes-the-message-back-out ()
+  (msl-test--with-queue
+    (let ((earlier (car (msl-test--schedule 3600 "Earlier")))
+          (buffer (msl-test--draft "Later"))
+          (quits 1))
+      (unwind-protect
+          (cl-letf* ((arm (symbol-function 'mu4e-send-later--backend-arm))
+                     ((symbol-function 'mu4e-send-later--backend-arm)
+                      (lambda (backend time)
+                        (when (>= (cl-decf quits) 0)
+                          (signal 'quit nil))
+                        (funcall arm backend time))))
+            (with-current-buffer buffer
+              (should (equal (condition-case err
+                                 (mu4e-send-later (+ (floor (float-time)) 7200))
+                               (quit err))
+                             '(quit)))))
+        (kill-buffer buffer))
+      ;; Not scheduled, as the draft left open says, and the rest re-armed.
+      (should (equal (mu4e-send-later--ids) (list earlier)))
+      (should (equal msl-test--armed (list (plist-get (mu4e-send-later--meta earlier) :due)))))))
+
 (ert-deftest msl-test-unverified-arm-is-an-error ()
   (msl-test--with-queue
     (setq msl-test--armed-p nil)

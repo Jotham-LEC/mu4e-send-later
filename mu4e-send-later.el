@@ -808,16 +808,17 @@ Called where `message-send-mail-function' would be.  Return the new ID."
       (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
       ;; The rename is what makes the item visible to a sender.
       (rename-file tmp (mu4e-send-later--item-dir id))
-      ;; If the wake-up can't be armed, take the message back out so the
-      ;; error aborts the send and the draft stays open.
+      ;; If the wake-up can't be armed, or you quit arming it, take the
+      ;; message back out so the error aborts the send and the draft
+      ;; stays open.
       (condition-case err
           (mu4e-send-later--arm)
-        (error
+        ((error quit)
          (delete-directory (mu4e-send-later--item-dir id) t)
          ;; Arming disarmed first, so what was queued before needs it too.
          (condition-case err2
              (mu4e-send-later--arm)
-           (error
+           ((error quit)
             (mu4e-send-later--notify
              "Scheduled mail won't be sent"
              (format "Nothing will wake up to send what was already scheduled: %s. Run M-x mu4e-send-later-check once that is fixed."
