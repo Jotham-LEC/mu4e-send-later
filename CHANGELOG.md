@@ -8,8 +8,9 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [0.3.1] — 2026-09-29
 
-Fixes from a second review: mail sent more than once, sends killed or hung, and
-locks, drafts and wake-ups left in a bad state.
+Fixes from a second and a third review: mail sent more than once, or at the
+wrong time, sends killed or hung, and locks, drafts and wake-ups left in a bad
+state.
 
 ### Fixed
 - **A sendmail that warned was sent again with every retry.** message.el calls a
@@ -50,6 +51,33 @@ locks, drafts and wake-ups left in a bad state.
   itself once it has run, instead of staying loaded to fire again next year; and
   a job knows itself by a variable its plist sets, not only by launchd's
   `XPC_SERVICE_NAME`.
+- **A failure after the message was queued put the draft back** and said
+  scheduling failed: an error writing the Fcc copy or in `message-sent-hook`, or
+  C-g as the draft closed. The message was scheduled all the same, so scheduling
+  it again sent it twice; and once the draft was killed, the text replaced
+  whatever buffer was current. That is now a warning, and the message is
+  reported scheduled.
+- **C-g while the wake-up was armed** left the message queued, with the draft
+  open as though it weren't. It is taken back out, as on any other failure.
+- **Reschedule could move another message.** If the message was sent while you
+  typed the time, the list refreshed and the message then at point was moved.
+  It is the message you asked about, or you're told it was sent.
+- **launchd: a job that fired early left nothing to send.** launchd's calendar
+  is local time, so a job fires early after a move to a zone further east, or
+  as summer time ends. It re-armed for the same time, as itself, then unloaded
+  itself. It now arms another job.
+- **With Gnus started, its agent took the message** instead of the scheduler,
+  queueing it in Gnus while unplugged.
+- **A failed schedule lost point** and left the rendered message on the undo
+  list. Both are as they were.
+- **`unload-feature`** left the mode's watch on the queue, raising an error at
+  each change to it.
+- **Edit failed for a draft message.el saved itself**, outside any maildir, when
+  mu4e was loaded. It opens in a buffer of its own.
+- **A failed write left a copy of the message** in a temporary directory in the
+  queue, which nothing removed.
+- **The startup check warned about the login job** when the path of Emacs or of
+  the package held a character the unit file or plist escapes.
 
 ### Changed
 - The README says what "at most once" covers: a send cut short is never repeated
