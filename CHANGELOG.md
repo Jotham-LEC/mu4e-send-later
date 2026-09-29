@@ -6,6 +6,62 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-29
+
+Fixes from a second review: mail sent more than once, sends killed or hung, and
+locks, drafts and wake-ups left in a bad state.
+
+### Fixed
+- **A sendmail that warned was sent again with every retry.** message.el calls a
+  sendmail that exits 0 but prints anything, as msmtp does about an expiring
+  certificate, a failure, so the message was retried and delivered up to five
+  times. It now counts as sent, with a notification of what sendmail said.
+- **Quitting Emacs killed a background send**, the one started for overdue mail,
+  send-now or the `emacs` backend, leaving the message "may have been sent". It
+  now runs under nohup and finishes after Emacs quits.
+- **A send function that prompted hung the background send**, holding the queue
+  lock. It now has no stdin, so the prompt fails and the send is retried.
+- **A dead sender's lock blocked everything for 15 minutes.** A lock whose owner
+  is on this host is now broken as soon as that process is gone, or its PID has
+  been reused. A live owner's lock is never broken. Locks with no owner, or one
+  on another host, still wait 15 minutes.
+- **A failed schedule left an org-msg draft as MML**, with the headers
+  message.el adds, and scheduling it again kept that as the draft to edit. The
+  draft is now put back as written.
+- **Cancel and edit losing the race to a send.** Cancel showed a raw
+  `file-missing` error, and edit said the original was still scheduled and to
+  cancel it, when it had been sent. Both now say it was sent, and edit that
+  sending the draft would send it again.
+- **send-now and reschedule resent a message whose send was interrupted**,
+  before the next run could mark it "may have been sent". They now refuse, and
+  mark it so, and doing it again is your choice.
+- **A failed schedule could silently leave earlier mail without a wake-up.**
+  That now gets an urgent notification.
+- **The list's Due column sorted by weekday name.** It sorts by time.
+- **A TIME with a fraction of a second** queued a message that couldn't be read
+  back. Any Lisp time value is now rounded down to a second.
+- **After a package.el upgrade, pending wake-ups ran the old, deleted
+  directory.** Loading the package again with the mode on re-arms them, from the
+  directory it was loaded from rather than wherever `load-path` finds it first.
+- **The background Emacs loaded a stale .elc** over newer source beside it.
+- **launchd**, checked by hand on a GitHub macOS runner, where a new CI job runs
+  the integration test: jobs get Emacs's `PATH`, not only the system
+  directories; loading a job that is loaded no longer fails; a job unloads
+  itself once it has run, instead of staying loaded to fire again next year; and
+  a job knows itself by a variable its plist sets, not only by launchd's
+  `XPC_SERVICE_NAME`.
+
+### Changed
+- The README says what "at most once" covers: a send cut short is never repeated
+  on its own, but a send that fails after the server took the message is retried
+  and arrives twice.
+- `make check` byte-compiles the tests too, with every warning an error, and
+  adds relint, a check of `emacs -Q` formatting, and a test of each option's
+  default against its type. CI tests Emacs 29.1, 30.1, 31.1 and snapshot, runs
+  the integration test against launchd on macOS, and fails on melpazoid
+  warnings.
+- The CHANGELOG no longer links to tags that were never made.
+
 ## [0.3.0] — 2026-09-28
 
 A review of what could send mail twice, send it now, or not send it at all.
@@ -78,5 +134,6 @@ First version.
   retried, then kept and reported.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
-[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Jotham-LEC/mu4e-send-later/releases/tag/v0.3.0
