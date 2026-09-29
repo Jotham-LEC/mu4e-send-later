@@ -767,7 +767,15 @@ Called where `message-send-mail-function' would be.  Return the new ID."
           (mu4e-send-later--arm)
         (error
          (delete-directory (mu4e-send-later--item-dir id) t)
-         (ignore-errors (mu4e-send-later--arm))
+         ;; Arming disarmed first, so what was queued before needs it too.
+         (condition-case err2
+             (mu4e-send-later--arm)
+           (error
+            (mu4e-send-later--notify
+             "Scheduled mail won't be sent"
+             (format "Nothing will wake up to send what was already scheduled: %s. Run M-x mu4e-send-later-check once that is fixed."
+                     (error-message-string err2))
+             t)))
          (signal (car err) (cdr err)))))
     (mu4e-send-later--log "queued %s for %s: %s" id
                           (format-time-string "%F %T" time) (plist-get meta :subject))

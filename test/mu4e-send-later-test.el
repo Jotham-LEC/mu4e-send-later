@@ -277,6 +277,23 @@ Skips the test where org-msg isn't installed, except on CI."
             (should-not (mu4e-send-later--ids)))
         (kill-buffer buffer)))))
 
+(ert-deftest msl-test-arm-failure-says-what-was-queued-is-unarmed ()
+  (msl-test--with-queue
+    (let ((earlier (car (msl-test--schedule 3600 "Earlier")))
+          (buffer (msl-test--draft "Later")))
+      (setq msl-test--arm-error "no scheduler")
+      (unwind-protect
+          (with-current-buffer buffer
+            (should-error (mu4e-send-later (+ (floor (float-time)) 7200))
+                          :type 'mu4e-send-later-backend-error))
+        (kill-buffer buffer))
+      (should (equal (mu4e-send-later--ids) (list earlier)))
+      ;; Arming failed for it too, and you're told so, loudly.
+      (should-not msl-test--armed)
+      (should (= (length msl-test--notified) 1))
+      (should (string-match-p "no scheduler" (nth 1 (car msl-test--notified))))
+      (should (nth 2 (car msl-test--notified))))))
+
 (ert-deftest msl-test-unverified-arm-is-an-error ()
   (msl-test--with-queue
     (setq msl-test--armed-p nil)
