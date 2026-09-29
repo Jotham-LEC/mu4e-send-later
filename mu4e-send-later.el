@@ -739,10 +739,11 @@ A plist of :text, :mode and :file, the file it was saved as.")
 
 (defun mu4e-send-later--header (name)
   "Decoded value of header NAME in the current message buffer, or \"\"."
-  (save-restriction
-    (message-narrow-to-headers-or-head)
-    (let ((value (message-fetch-field name)))
-      (if value (rfc2047-decode-string value) ""))))
+  (save-excursion
+    (save-restriction
+      (message-narrow-to-headers-or-head)
+      (let ((value (message-fetch-field name)))
+        (if value (rfc2047-decode-string value) "")))))
 
 (defun mu4e-send-later--effective-send-function (send-function)
   "The function SEND-FUNCTION sends with once `send-mail-function' is read.
@@ -895,7 +896,9 @@ it is read with `org-read-date' and confirmed."
           (message-server-alist nil)
           ;; Gnus's agent, set once Gnus starts, would take the message.
           (message-send-mail-real-function nil)
-          (draft (current-buffer)))
+          (draft (current-buffer))
+          (point (point))
+          (undo buffer-undo-list))
       (condition-case err
           (message-send-and-exit)
         (t
@@ -909,7 +912,8 @@ it is read with `org-read-date' and confirmed."
                       (error-message-string err)))
            ;; Sending renders the draft, adding headers, and org-msg
            ;; turns it into MML; put back what the user wrote, to try
-           ;; again.
+           ;; again, and where they were.  Undo is as it was too: the
+           ;; text is, so its entries still apply.
            (when (buffer-live-p draft)
              (with-current-buffer draft
                (let ((text (plist-get mu4e-send-later--draft :text)))
@@ -918,7 +922,8 @@ it is read with `org-read-date' and confirmed."
                    (unless (equal text (buffer-string))
                      (erase-buffer)
                      (insert text)
-                     (goto-char (point-min)))))))
+                     (setq buffer-undo-list undo)))
+                 (goto-char (min point (point-max))))))
            (signal (car err) (cdr err))))))
     (unless id
       (signal 'mu4e-send-later-error

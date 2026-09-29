@@ -259,6 +259,43 @@ Skips the test where org-msg isn't installed, except on CI."
               (should (string-match-p "<b>bold</b>" (msl-test--stored id)))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+;; And puts you back where you were, with undo as it was.
+(ert-deftest msl-test-failed-schedule-keeps-point-and-undo ()
+  (msl-test--with-queue
+    (let ((buffer (msl-test--draft "Here")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (buffer-enable-undo)
+            (goto-char (point-max))
+            (insert "More.\n")
+            (undo-boundary)
+            (search-backward "ünïcode")
+            ;; Refused before sending.
+            (save-excursion
+              (goto-char (point-min))
+              (insert "X-Message-SMTP-Method: smtp mail.example.com 587\n"))
+            (let ((point (point))
+                  (undo nil))
+              (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                            :type 'user-error)
+              (should (= (point) point))
+              (goto-char (point-min))
+              (delete-line)
+              (goto-char point)
+              (setq point (point)
+                    undo buffer-undo-list)
+              ;; Failing once sending has rendered it.
+              (setq msl-test--arm-error "no scheduler")
+              (add-hook 'message-send-hook
+                        (lambda () (goto-char (point-max)) (insert "Rendered.\n"))
+                        nil t)
+              (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                            :type 'mu4e-send-later-backend-error)
+              (should-not (save-excursion (search-forward "Rendered." nil t)))
+              (should (= (point) point))
+              (should (eq buffer-undo-list undo))))
+        (kill-buffer buffer)))))
+
 ;; message.el goes on once it has handed the message over: Fcc, its
 ;; hooks, killing the draft, the exit actions.  A failure there, or C-g,
 ;; leaves the message scheduled, so it mustn't look as if it weren't.
