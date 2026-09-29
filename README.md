@@ -14,7 +14,8 @@ mail shows up in mu4e, where you can read, edit, reschedule, send or cancel it.
   whenever the queue changes. An empty queue has no timer at all.
 - **It fails loudly.** You're only told "Scheduled" once the timer has been
   created *and* checked. Failed sends are retried, then kept and reported, never
-  dropped. A message is sent at most once; if that's ever in doubt, you're told.
+  dropped. A send cut short is never repeated on its own; if a message may
+  have gone out, you're told.
 
 ## Install
 
@@ -171,7 +172,7 @@ also catches the case where the timer never fired at all. A sendmail that
 exits 0 but prints something (a warning from msmtp, say) took the message, so
 it counts as sent, and what it printed is shown in a notification.
 
-Delivery is at most once, and loud about it. A message is marked `sending`
+A send cut short is never repeated on its own. A message is marked `sending`
 just before it's handed to your send function. If the sender dies right then
 (a crash, a power cut), there's no way to know whether the mail server already
 took it, so it is never sent again on its own. The next run marks it failed
@@ -179,14 +180,21 @@ with "may have been sent, please check", with an urgent notification. I'd
 rather tell you than send it twice. Look in your Sent folder or ask the
 recipient, then `send-now` or `cancel` it.
 
+That makes delivery at most once as far as this package can know, not
+absolutely. A send that fails is retried, and your send function only knows
+what the server told it: if the server took the message but the connection
+dropped before it said so, the send looks failed, and the retry delivers it a
+second time.
+
 Errors are signalled as `mu4e-send-later-backend-error` or
 `mu4e-send-later-send-error`, both children of `mu4e-send-later-error`.
 Everything is logged to `~/.local/state/mu4e-send-later/log`.
 
 ## Caveats
 
-- Delivery is at most once (see above). A crash at the wrong moment means a
-  message you have to check by hand, never one sent twice.
+- A crash at the wrong moment means a message you have to check by hand, not
+  one sent twice. A send that fails after the server has taken the message,
+  though, is retried and arrives twice (see above).
 - Anything that happens *on* send happens when you schedule: Fcc/sent-folder
   copies, deleting the draft, marking the parent as replied. (Gmail users with
   `mu4e-sent-messages-behavior` set to `delete` get the Sent copy at the real
