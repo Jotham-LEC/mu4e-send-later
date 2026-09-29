@@ -1014,22 +1014,39 @@ Schedule a retry, or once they are used up, mark it failed."
 (defun mu4e-send-later--flush-async (&optional on-exit)
   "Send due mail in a background Emacs without blocking this one.
 Call ON-EXIT with the exit status when it finishes."
+  (mu4e-send-later--make-queue-dir)
   (let* ((buffer (generate-new-buffer " *mu4e-send-later*"))
-         (command (mu4e-send-later--command 'mu4e-send-later-batch-flush)))
+         ;; In the queue, where it is private, and where the one left by
+         ;; a sender that outlived us can be found.
+         (out (make-temp-file (mu4e-send-later--dir "flush-") nil ".out"))
+         ;; nohup, and output to a file rather than to us, let the send
+         ;; outlive this Emacs, which hangs up on its children as it
+         ;; exits.  With no stdin, a send function that prompts fails
+         ;; instead of waiting forever.
+         (command (append (list "sh" "-c"
+                                "out=$1; shift; exec nohup \"$@\" </dev/null >\"$out\" 2>&1"
+                                "sh" out)
+                          (mu4e-send-later--command 'mu4e-send-later-batch-flush))))
     (make-process
      :name "mu4e-send-later" :buffer buffer :command command :noquery t
      :connection-type 'pipe
      :sentinel
      (lambda (proc _event)
        (unless (process-live-p proc)
-         (let ((status (process-exit-status proc)))
+         (let ((status (process-exit-status proc))
+               (output (concat (with-temp-buffer
+                                 (ignore-errors (insert-file-contents out))
+                                 (buffer-string))
+                               ;; Only from sh, if it couldn't start the rest.
+                               (with-current-buffer buffer (buffer-string)))))
+           (ignore-errors (delete-file out))
+           (kill-buffer buffer)
            (unless (zerop status)
              (display-warning
               'mu4e-send-later
               (format "Sending scheduled mail failed (exit %d):\n%s\nSee M-x mu4e-send-later-list."
-                      status (with-current-buffer buffer (string-trim (buffer-string))))
+                      status (string-trim output))
               :error))
-           (kill-buffer buffer)
            (when (eq (mu4e-send-later--backend) 'emacs)
              (mu4e-send-later--report-errors
               (lambda () (mu4e-send-later--with-lock (mu4e-send-later--arm)))))

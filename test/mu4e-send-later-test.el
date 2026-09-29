@@ -619,6 +619,84 @@ Each message it reads is appended to DIR/sent, followed by a line
         (mu4e-send-later-check))
       (should flushed))))
 
+;; The background sender inherits no terminal and no pipe to read from:
+;; a send function that asks for something fails rather than hangs.
+(ert-deftest msl-test-background-send-that-prompts-fails-at-once ()
+  (msl-test--with-queue
+    (let* ((mu4e-send-later-variables '(send-mail-function))
+           (send-mail-function '(lambda () (read-passwd "SMTP password: ")))
+           ;; So the background Emacs can't pop up real notifications.
+           (process-environment (cons "DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent"
+                                      process-environment))
+           (buffer (msl-test--draft "Prompts"))
+           (status nil))
+      (unwind-protect
+          (let ((id (with-current-buffer buffer
+                      (setq-local message-send-mail-function
+                                  #'message-use-send-mail-function)
+                      (mu4e-send-later (+ (floor (float-time)) 3600)))))
+            (msl-test--make-due id)
+            ;; The background Emacs has no fake backend: it mustn't re-arm.
+            (mu4e-send-later--write-config 'emacs)
+            (mu4e-send-later--flush-async (lambda (s) (setq status s)))
+            (with-timeout (30 (ert-fail "The background send hung"))
+              (while (not status)
+                (accept-process-output nil 0.1)))
+            (should (= status 1))
+            (let ((meta (mu4e-send-later--meta id)))
+              (should (eq (plist-get meta :state) 'pending))
+              (should (= (plist-get meta :attempts) 1))
+              (should (string-match-p "stdin" (plist-get meta :last-error))))
+            (should-not (file-exists-p (mu4e-send-later--lock-dir))))
+        (dolist (process (process-list))
+          (when (string-prefix-p "mu4e-send-later" (process-name process))
+            (delete-process process)))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+;; Quitting Emacs while it sends in the background mustn't stop the send.
+;; Emacs hangs up on its children as it exits, which kills a background
+;; Emacs busy in Lisp, as smtpmail is.
+(ert-deftest msl-test-background-send-outlives-its-emacs ()
+  (msl-test--with-queue
+    (let* ((dir (make-temp-file "msl-sendmail-" t))
+           (mu4e-send-later-variables
+            '(send-mail-function sendmail-program message-sendmail-f-is-evil))
+           (send-mail-function '(lambda ()
+                                  (sleep-for 2)
+                                  (message-send-mail-with-sendmail)))
+           (sendmail-program (msl-test--fake-sendmail dir ""))
+           (message-sendmail-f-is-evil t)
+           (process-environment (cons "DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent"
+                                      process-environment))
+           (buffer (msl-test--draft "Outlives")))
+      (unwind-protect
+          (let ((id (with-current-buffer buffer
+                      (setq-local message-send-mail-function
+                                  #'message-use-send-mail-function)
+                      (mu4e-send-later (+ (floor (float-time)) 3600)))))
+            (msl-test--make-due id)
+            (mu4e-send-later--write-config 'emacs)
+            ;; An Emacs that starts a background send, then quits.
+            (should (zerop (call-process
+                            (expand-file-name invocation-name invocation-directory)
+                            nil nil nil "-Q" "--batch"
+                            "-L" (mu4e-send-later--library-dir) "-l" "mu4e-send-later"
+                            "--eval"
+                            (format "%S" `(progn
+                                            (setq mu4e-send-later-directory
+                                                  ,(mu4e-send-later--dir)
+                                                  mu4e-send-later-backend 'emacs)
+                                            (mu4e-send-later--flush-async)
+                                            (sleep-for 1)
+                                            (kill-emacs 0))))))
+            (with-timeout (30 (ert-fail "The send didn't finish"))
+              (while (member id (mu4e-send-later--ids))
+                (sleep-for 0.2)))
+            (should (= (msl-test--deliveries dir) 1))
+            (should-not (file-exists-p (mu4e-send-later--lock-dir))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (delete-directory dir t)))))
+
 (defun msl-test--corrupt (id &optional contents)
   "Replace the metadata of item ID with CONTENTS, a truncated plist by default."
   (with-temp-file (expand-file-name "meta.eld" (mu4e-send-later--item-dir id))

@@ -203,6 +203,9 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 - The background Emacs has no access to secrets unlocked in your session. Most
   sendmail setups are fine, including msmtp with `passwordeval`. smtpmail with
   `~/.authinfo.gpg` needs gpg-agent to already have the passphrase cached.
+  Nothing can answer a prompt there either: a send that asks for a password
+  fails and is retried, rather than waiting.
+- A send already under way in the background carries on if you quit Emacs.
 - Upgrades. Pending timers and the login job name the Emacs executable and the
   directory this package was loaded from, and an upgrade can move either. The
   startup check re-arms the timers each time Emacs starts, and warns if the
