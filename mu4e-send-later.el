@@ -1103,9 +1103,15 @@ Schedule a retry, or once they are used up, mark it failed."
   "Send due mail in a background Emacs without blocking this one.
 Call ON-EXIT with the exit status when it finishes."
   (mu4e-send-later--make-queue-dir)
+  ;; What's left of senders that outlived the Emacs that would read it.
+  (dolist (file (directory-files (mu4e-send-later--dir) t "\\`flush-.*\\.out\\'"))
+    (when (> (float-time (time-since (file-attribute-modification-time
+                                      (file-attributes file))))
+             86400)
+      (ignore-errors (delete-file file))))
   (let* ((buffer (generate-new-buffer " *mu4e-send-later*"))
-         ;; In the queue, where it is private, and where the one left by
-         ;; a sender that outlived us can be found.
+         ;; In the queue, where it is private, and where one left behind
+         ;; is found again.
          (out (make-temp-file (mu4e-send-later--dir "flush-") nil ".out"))
          ;; nohup, and output to a file rather than to us, let the send
          ;; outlive this Emacs, which hangs up on its children as it

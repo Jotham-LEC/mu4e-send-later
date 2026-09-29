@@ -786,6 +786,28 @@ Each message it reads is appended to DIR/sent, followed by a line
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (delete-directory dir t)))))
 
+;; The output of a sender that outlived its Emacs is never read.
+(ert-deftest msl-test-background-send-output-left-behind-is-cleaned-up ()
+  (msl-test--with-queue
+    (let ((old (mu4e-send-later--dir "flush-old.out"))
+          (recent (mu4e-send-later--dir "flush-recent.out"))
+          (status nil))
+      (mu4e-send-later--make-queue-dir)
+      (dolist (file (list old recent))
+        (write-region "" nil file))
+      (set-file-times old (time-subtract nil (* 2 86400)))
+      (mu4e-send-later--write-config 'emacs)
+      (mu4e-send-later--flush-async (lambda (s) (setq status s)))
+      (with-timeout (30 (ert-fail "The background send hung"))
+        (while (not status)
+          (accept-process-output nil 0.1)))
+      (should-not (file-exists-p old))
+      ;; Its sender may still be running.
+      (should (file-exists-p recent))
+      ;; And ours was read and removed.
+      (should (equal (directory-files (mu4e-send-later--dir) nil "\\`flush-")
+                     '("flush-recent.out"))))))
+
 (defun msl-test--corrupt (id &optional contents)
   "Replace the metadata of item ID with CONTENTS, a truncated plist by default."
   (with-temp-file (expand-file-name "meta.eld" (mu4e-send-later--item-dir id))
