@@ -259,6 +259,40 @@ Skips the test where org-msg isn't installed, except on CI."
               (should (string-match-p "<b>bold</b>" (msl-test--stored id)))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+;; message.el goes on once it has handed the message over: Fcc, its
+;; hooks, killing the draft, the exit actions.  A failure there, or C-g,
+;; leaves the message scheduled, so it mustn't look as if it weren't.
+(ert-deftest msl-test-failure-after-queuing-leaves-it-scheduled ()
+  (msl-test--with-queue
+    (let ((other (generate-new-buffer "*msl-other*"))
+          (warnings nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'display-warning)
+                     (lambda (_type message &rest _) (push message warnings))))
+            ;; mu4e's `message-sent-hook' fails.
+            (let ((buffer (msl-test--draft "Hooked"))
+                  (message-interactive t))
+              (with-current-buffer buffer
+                (add-hook 'message-sent-hook (lambda () (error "mu server gone")) nil t)
+                (should (equal (mu4e-send-later (+ (floor (float-time)) 3600))
+                               (car (mu4e-send-later--ids)))))
+              (kill-buffer buffer))
+            (should (string-match-p "mu server gone" (car warnings)))
+            ;; C-g in an exit action, once the draft is killed and another
+            ;; buffer is current.
+            (with-current-buffer other (insert "Someone's work\n"))
+            (let ((buffer (msl-test--draft "Quit"))
+                  (message-interactive t))
+              (switch-to-buffer other)
+              (switch-to-buffer buffer)
+              (setq-local message-kill-buffer-on-exit t)
+              (setq-local message-exit-actions (list (lambda () (signal 'quit nil))))
+              (should (mu4e-send-later (+ (floor (float-time)) 3600)))
+              (should-not (buffer-live-p buffer)))
+            (should (= (length (mu4e-send-later--ids)) 2))
+            (should (equal (with-current-buffer other (buffer-string)) "Someone's work\n")))
+        (kill-buffer other)))))
+
 (ert-deftest msl-test-non-draft-buffer-is-refused ()
   (msl-test--with-queue
     (with-temp-buffer

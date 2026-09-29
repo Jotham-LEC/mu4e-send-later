@@ -880,20 +880,32 @@ it is read with `org-read-date' and confirmed."
           ;; Split sends would queue each part separately.
           (message-send-mail-partially-limit nil)
           ;; Otherwise it adds X-Message-SMTP-Method, which sends now.
-          (message-server-alist nil))
+          (message-server-alist nil)
+          (draft (current-buffer)))
       (condition-case err
           (message-send-and-exit)
         (t
-         ;; Sending renders the draft, adding headers, and org-msg turns
-         ;; it into MML; put back what the user wrote, to try again.
-         (let ((text (plist-get mu4e-send-later--draft :text)))
-           (save-restriction
-             (widen)
-             (unless (equal text (buffer-string))
-               (erase-buffer)
-               (insert text)
-               (goto-char (point-min)))))
-         (signal (car err) (cdr err)))))
+         (if id
+             ;; What message.el does once the message is handed over
+             ;; (Fcc, its hooks, exit actions) failed, or you quit it:
+             ;; the message is queued all the same.
+             (display-warning
+              'mu4e-send-later
+              (format "Scheduled, but what follows sending failed: %s"
+                      (error-message-string err)))
+           ;; Sending renders the draft, adding headers, and org-msg
+           ;; turns it into MML; put back what the user wrote, to try
+           ;; again.
+           (when (buffer-live-p draft)
+             (with-current-buffer draft
+               (let ((text (plist-get mu4e-send-later--draft :text)))
+                 (save-restriction
+                   (widen)
+                   (unless (equal text (buffer-string))
+                     (erase-buffer)
+                     (insert text)
+                     (goto-char (point-min)))))))
+           (signal (car err) (cdr err))))))
     (unless id
       (signal 'mu4e-send-later-error
               '("The message was sent without passing through the scheduler; check it was not sent now")))
