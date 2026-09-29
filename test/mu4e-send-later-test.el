@@ -1085,6 +1085,27 @@ Each message it reads is appended to DIR/sent, followed by a line
       (should (eql (plist-get (mu4e-send-later--meta id) :due) later))
       (should-not msl-test--sent))))
 
+;; While you type the time, the message can be sent in the background,
+;; and the watch on the queue refreshes the list under you.
+(ert-deftest msl-test-reschedule-moves-the-message-it-asked-about ()
+  (msl-test--with-queue
+    (let* ((first (car (msl-test--schedule 3600 "First")))
+           (second (car (msl-test--schedule 7200 "Second")))
+           (due (plist-get (mu4e-send-later--meta first) :due)))
+      (msl-test--in-list
+       "Second"
+       (lambda ()
+         (cl-letf (((symbol-function 'mu4e-send-later--read-time)
+                    (lambda ()
+                      (delete-directory (mu4e-send-later--item-dir second) t)
+                      (mu4e-send-later--changed)
+                      (+ (floor (float-time)) 86400))))
+           (should (string-match-p
+                    "already sent"
+                    (cadr (should-error (call-interactively #'mu4e-send-later-reschedule)
+                                        :type 'user-error)))))))
+      (should (eql (plist-get (mu4e-send-later--meta first) :due) due)))))
+
 (ert-deftest msl-test-flush-keeps-the-lock-fresh ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600)))

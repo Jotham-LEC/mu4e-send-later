@@ -1583,13 +1583,15 @@ Schedule it again with `mu4e-send-later' once edited."
   (message "Sending…"))
 
 ;;;###autoload
-(defun mu4e-send-later-reschedule (time)
-  "Move the message at point to TIME.
+(defun mu4e-send-later-reschedule (time &optional id)
+  "Move the message at point, or queued item ID, to TIME.
 TIME is as for `mu4e-send-later'."
-  (interactive (progn (mu4e-send-later--id-at-point)
-                      (list (mu4e-send-later--read-time))))
+  ;; What is at point once the time is read may be another message: the
+  ;; list is refreshed when one is sent meanwhile.
+  (interactive (let ((id (mu4e-send-later--id-at-point)))
+                 (list (mu4e-send-later--read-time) id)))
   (setq time (mu4e-send-later--seconds time))
-  (mu4e-send-later--update (mu4e-send-later--id-at-point)
+  (mu4e-send-later--update (or id (mu4e-send-later--id-at-point))
                            (lambda (meta)
                              (thread-first meta
                                            (plist-put :state 'pending)
