@@ -820,7 +820,19 @@ TIME is a Unix time in seconds; interactively it is read with
           (message-send-mail-partially-limit nil)
           ;; Otherwise it adds X-Message-SMTP-Method, which sends now.
           (message-server-alist nil))
-      (message-send-and-exit))
+      (condition-case err
+          (message-send-and-exit)
+        (t
+         ;; Sending renders the draft, adding headers, and org-msg turns
+         ;; it into MML; put back what the user wrote, to try again.
+         (let ((text (plist-get mu4e-send-later--draft :text)))
+           (save-restriction
+             (widen)
+             (unless (equal text (buffer-string))
+               (erase-buffer)
+               (insert text)
+               (goto-char (point-min)))))
+         (signal (car err) (cdr err)))))
     (unless id
       (signal 'mu4e-send-later-error
               '("The message was sent without passing through the scheduler; check it was not sent now")))

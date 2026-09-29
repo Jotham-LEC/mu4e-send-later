@@ -217,6 +217,30 @@ Skips the test where org-msg isn't installed, except on CI."
             (should-not msl-test--armed))
         (kill-buffer buffer)))))
 
+;; A failure while scheduling comes after message.el has added headers
+;; and org-msg has turned the draft into MML.
+(ert-deftest msl-test-failed-schedule-leaves-the-draft-as-written ()
+  (msl-test--with-queue
+    (let* ((buffer (msl-test--org-msg-draft '(utf-8 html) "This is *bold*."))
+           (written (with-current-buffer buffer (buffer-string)))
+           (mail-user-agent 'message-user-agent)
+           (message-interactive t))
+      (unwind-protect
+          (with-current-buffer buffer
+            (setq msl-test--arm-error "no scheduler")
+            (should-error (mu4e-send-later (+ (floor (float-time)) 3600))
+                          :type 'mu4e-send-later-backend-error)
+            (should (equal (buffer-string) written))
+            (should (derived-mode-p 'org-msg-edit-mode))
+            ;; Scheduled again, it is the Org source that is kept to edit.
+            (setq msl-test--arm-error nil)
+            (let ((id (mu4e-send-later (+ (floor (float-time)) 3600))))
+              (with-temp-buffer
+                (insert-file-contents (expand-file-name "draft" (mu4e-send-later--item-dir id)))
+                (should (equal (buffer-string) written)))
+              (should (string-match-p "<b>bold</b>" (msl-test--stored id)))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest msl-test-non-draft-buffer-is-refused ()
   (msl-test--with-queue
     (with-temp-buffer
