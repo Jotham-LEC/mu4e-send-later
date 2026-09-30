@@ -156,6 +156,8 @@ sync doesn't upload it."
               "Couldn't arm the send-later wake-up" 'mu4e-send-later-error)
 (define-error 'mu4e-send-later-send-error
               "Sending a scheduled message failed" 'mu4e-send-later-error)
+(define-error 'mu4e-send-later-busy
+              "Another sender is busy with the queue" 'mu4e-send-later-error)
 
 ;;;; Queue
 
@@ -268,11 +270,13 @@ the start time is worked out from not agreeing with file times.")
       (insert-file-contents (expand-file-name "owner" (mu4e-send-later--lock-dir)))
       (string-trim (buffer-string)))))
 
-(defun mu4e-send-later--lock-stale-p (owner)
-  "Non-nil if the lock, held by OWNER, was left behind by a dead sender.
-An owner on this host is asked directly: the lock is stale as soon as
-that process is gone, or is a newer one that reused its PID, and never
-while it runs.  Otherwise the lock must be old."
+(defun mu4e-send-later--lock-status (owner)
+  "What to make of the lock, held by OWNER.
+`stale' if a dead sender left it behind, `busy' if a sender on this
+host holds it, is running and has used it lately, nil otherwise.
+An owner on this host is asked directly: it is dead as soon as that
+process is gone, or is a newer one that reused its PID, and never
+while it runs.  Otherwise the lock is stale once it is old."
   (let* ((mtime (file-attribute-modification-time
                  (file-attributes (mu4e-send-later--lock-dir))))
          (old (and mtime (> (float-time (time-since mtime))
@@ -282,20 +286,34 @@ while it runs.  Otherwise the lock must be old."
             ;; Unless processes can't be seen here at all.
             (guard (process-attributes (emacs-pid))))
        (let ((attributes (process-attributes (string-to-number pid))))
-         (or (null attributes)
-             (let ((start (alist-get 'start attributes)))
-               (and start
-                    (time-less-p (time-add mtime mu4e-send-later--pid-reuse-margin)
-                                 start))))))
+         (cond ((or (null attributes)
+                    (let ((start (alist-get 'start attributes)))
+                      (and start
+                           (time-less-p (time-add mtime mu4e-send-later--pid-reuse-margin)
+                                        start))))
+                'stale)
+               ;; One that hasn't touched it for this long may be hung.
+               ((not old) 'busy))))
       ;; An owner on another host, or none written, as by 0.2.
-      (_ old))))
+      (_ (and old 'stale)))))
+
+(defun mu4e-send-later--lock-stale-p (owner)
+  "Non-nil if the lock, held by OWNER, was left behind by a dead sender."
+  (eq (mu4e-send-later--lock-status owner) 'stale))
 
 (defun mu4e-send-later--touch-lock ()
   "Show the lock is still in use, so it isn't taken for stale."
   (ignore-errors (set-file-times (mu4e-send-later--lock-dir))))
 
-(defun mu4e-send-later--call-with-lock (fn)
-  "Call FN holding the queue lock."
+(defvar mu4e-send-later--armed nil
+  "Non-nil once the wake-up has been re-armed under the lock held now.")
+
+(defun mu4e-send-later--call-with-lock (fn &optional unless-busy)
+  "Call FN holding the queue lock.
+With UNLESS-BUSY, signal `mu4e-send-later-busy' rather than wait if a
+sender on this host holds the lock and is busy: it re-arms the wake-up
+as it lets go, which covers whatever falls due meanwhile.  Whoever
+holds the lock re-arms before letting go, even if FN fails."
   (let* ((lock (mu4e-send-later--lock-dir))
          (token (format "%d %s %06x" (emacs-pid) (system-name) (random #xffffff)))
          ;; A background sender can wait out a long send; you shouldn't.
@@ -304,12 +322,17 @@ while it runs.  Otherwise the lock must be old."
     (while (condition-case nil
                (progn (make-directory lock) nil)
              (file-already-exists t))
-      ;; A sender that died mid-flush leaves its lock behind.
-      (let ((owner (mu4e-send-later--lock-owner)))
-        (when (and (mu4e-send-later--lock-stale-p owner)
-                   ;; Unless someone else broke it and took it meanwhile.
-                   (equal owner (mu4e-send-later--lock-owner)))
-          (ignore-errors (delete-directory lock t))))
+      (let* ((owner (mu4e-send-later--lock-owner))
+             (status (mu4e-send-later--lock-status owner)))
+        (pcase status
+          ;; A sender that died mid-flush leaves its lock behind.
+          ('stale
+           ;; Unless someone else broke it and took it meanwhile.
+           (when (equal owner (mu4e-send-later--lock-owner))
+             (ignore-errors (delete-directory lock t))))
+          ('busy
+           (when unless-busy
+             (signal 'mu4e-send-later-busy (list owner))))))
       (when (> (float-time) deadline)
         (if noninteractive
             (signal 'mu4e-send-later-error
@@ -320,10 +343,16 @@ while it runs.  Otherwise the lock must be old."
         (write-region (concat token "\n") nil (expand-file-name "owner" lock) nil 'silent)
       (error (ignore-errors (delete-directory lock t))
              (signal (car err) (cdr err))))
-    (unwind-protect (funcall fn)
-      ;; If ours was broken as stale, the lock there now is someone else's.
-      (when (equal (mu4e-send-later--lock-owner) token)
-        (ignore-errors (delete-directory lock t))))))
+    (let ((mu4e-send-later--armed nil)
+          (done nil))
+      (unwind-protect (prog1 (funcall fn) (setq done t))
+        ;; A wake-up that fired while we held the lock found it busy
+        ;; and left the queue to us, so what it was for needs one again.
+        (unless (or done mu4e-send-later--armed)
+          (mu4e-send-later--rearm-after-failure))
+        ;; If ours was broken as stale, the lock there now is someone else's.
+        (when (equal (mu4e-send-later--lock-owner) token)
+          (ignore-errors (delete-directory lock t)))))))
 
 (defmacro mu4e-send-later--with-lock (&rest body)
   "Run BODY holding the queue lock."
@@ -687,6 +716,7 @@ unloads us, so this comes last."
 (defun mu4e-send-later--arm ()
   "Point the wake-up at the next message due and check it took.
 Return that time, or nil if nothing is pending."
+  (setq mu4e-send-later--armed t)
   (let ((backend (mu4e-send-later--backend))
         (next (mu4e-send-later--next-wake)))
     (mu4e-send-later--write-config backend)
@@ -698,6 +728,24 @@ Return that time, or nil if nothing is pending."
                 (list (format "The %s wake-up for %s wasn't there after arming it"
                               backend (format-time-string "%F %T" next))))))
     next))
+
+(defun mu4e-send-later--arms-here-p ()
+  "Non-nil if this Emacs arms the wake-up.
+The `emacs' backend's timer lives in the interactive Emacs, which
+re-arms when a background sender exits."
+  (not (and noninteractive (eq (mu4e-send-later--backend) 'emacs))))
+
+(defun mu4e-send-later--rearm-after-failure ()
+  "Re-arm the wake-up after a failure, notifying rather than signalling."
+  (condition-case err
+      (when (mu4e-send-later--arms-here-p)
+        (mu4e-send-later--arm))
+    ((error quit)
+     (mu4e-send-later--notify
+      "Scheduled mail won't be sent"
+      (format "Nothing will wake up to send what is scheduled: %s. Run M-x mu4e-send-later-check once that is fixed."
+              (error-message-string err))
+      t))))
 
 ;;;; Capturing a message
 
@@ -1059,26 +1107,27 @@ Schedule a retry, or once they are used up, mark it failed."
            (plist-get meta :subject) mu4e-send-later--interrupted-error)
    t))
 
-(defun mu4e-send-later--flush ()
-  "Send every due message, then re-arm.  Return the number that failed."
+(defun mu4e-send-later--flush (&optional unless-busy)
+  "Send every due message, then re-arm.  Return the number that failed.
+UNLESS-BUSY is as for `mu4e-send-later--call-with-lock'."
   (let ((failed 0))
-    (mu4e-send-later--with-lock
-      (dolist (id (mu4e-send-later--ids))
-        (mu4e-send-later--touch-lock)
-        (let* ((meta (mu4e-send-later--checked-meta id t))
-               (wake (mu4e-send-later--wake-time meta)))
-          (cond ((not meta)
-                 (cl-incf failed))
-                ((eq (plist-get meta :state) 'sending)
-                 (mu4e-send-later--mark-interrupted id meta)
-                 (cl-incf failed))
-                ((and wake (<= wake (float-time)))
-                 (unless (mu4e-send-later--attempt id)
-                   (cl-incf failed))))))
-      ;; The emacs backend's timer lives in the interactive Emacs, which
-      ;; re-arms when this process exits.
-      (unless (and noninteractive (eq (mu4e-send-later--backend) 'emacs))
-        (mu4e-send-later--arm)))
+    (mu4e-send-later--call-with-lock
+     (lambda ()
+       (dolist (id (mu4e-send-later--ids))
+         (mu4e-send-later--touch-lock)
+         (let* ((meta (mu4e-send-later--checked-meta id t))
+                (wake (mu4e-send-later--wake-time meta)))
+           (cond ((not meta)
+                  (cl-incf failed))
+                 ((eq (plist-get meta :state) 'sending)
+                  (mu4e-send-later--mark-interrupted id meta)
+                  (cl-incf failed))
+                 ((and wake (<= wake (float-time)))
+                  (unless (mu4e-send-later--attempt id)
+                    (cl-incf failed))))))
+       (when (mu4e-send-later--arms-here-p)
+         (mu4e-send-later--arm)))
+     unless-busy)
     failed))
 
 (defun mu4e-send-later--batch-setup ()
@@ -1097,7 +1146,13 @@ Schedule a retry, or once they are used up, mark it failed."
     (error "`mu4e-send-later-batch-flush' is for Emacs in batch mode"))
   (mu4e-send-later--batch-setup)
   (let ((status (condition-case err
-                    (if (zerop (mu4e-send-later--flush)) 0 1)
+                    (if (zerop (mu4e-send-later--flush t)) 0 1)
+                  ;; Started while another send runs, by send-now say:
+                  ;; that one sends what is due, or re-arms for it.
+                  (mu4e-send-later-busy
+                   (mu4e-send-later--log "%s is sending; leaving the queue to it"
+                                         (cadr err))
+                   0)
                   (error
                    (mu4e-send-later--notify
                     "Scheduled mail: sender broken"
@@ -1181,7 +1236,10 @@ Call ON-EXIT with the exit status when it finishes."
               :error))
            (when (eq (mu4e-send-later--backend) 'emacs)
              (mu4e-send-later--report-errors
-              (lambda () (mu4e-send-later--with-lock (mu4e-send-later--arm)))))
+              (lambda ()
+                ;; Not waiting, in a sentinel: whoever is busy re-arms.
+                (ignore-error mu4e-send-later-busy
+                  (mu4e-send-later--call-with-lock #'mu4e-send-later--arm t)))))
            (mu4e-send-later--changed)
            (when on-exit (funcall on-exit status))))))))
 

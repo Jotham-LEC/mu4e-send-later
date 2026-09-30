@@ -907,6 +907,41 @@ Each message it reads is appended to DIR/sent, followed by a line
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (delete-directory dir t)))))
 
+;; send-now arms the wake-up for now and starts a send too: whichever
+;; comes second finds the other sending, and leaves the queue to it,
+;; which re-arms when it's done.  It used to wait a minute for the lock,
+;; then say the sender was broken.
+(ert-deftest msl-test-background-send-leaves-a-busy-queue-to-its-sender ()
+  (msl-test--with-queue
+    (let ((id (car (msl-test--schedule 3600 "Busy")))
+          (process-environment (cons "DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent"
+                                     process-environment))
+          (status nil)
+          (warnings nil))
+      (msl-test--make-due id)
+      (mu4e-send-later--write-config 'emacs)
+      ;; This Emacs stands in for the sender that is busy.
+      (msl-test--hold-lock (emacs-pid) (system-name))
+      (cl-letf (((symbol-function 'mu4e-send-later--backend) (lambda () 'emacs))
+                ((symbol-function 'display-warning)
+                 (lambda (&rest args) (push args warnings))))
+        (unwind-protect
+            (progn
+              (mu4e-send-later--flush-async (lambda (s) (setq status s)))
+              (with-timeout (30 (ert-fail "The background send waited for the lock"))
+                (while (not status)
+                  (accept-process-output nil 0.1))))
+          (mu4e-send-later--backend-disarm 'emacs)))
+      (should (= status 0))
+      (should-not warnings)
+      (should (member id (mu4e-send-later--ids)))
+      (should (file-exists-p (expand-file-name "owner" (mu4e-send-later--lock-dir))))
+      (with-temp-buffer
+        (insert-file-contents (mu4e-send-later--dir "log"))
+        (should (search-forward "leaving the queue to it" nil t))
+        (goto-char (point-min))
+        (should-not (search-forward "broken" nil t))))))
+
 ;; The output of a sender that outlived its Emacs is never read.
 (ert-deftest msl-test-background-send-output-left-behind-is-cleaned-up ()
   (msl-test--with-queue
@@ -1105,6 +1140,73 @@ Each message it reads is appended to DIR/sent, followed by a line
       (should waited)
       ;; Given up after about 5 seconds of the stubbed clock, not 60.
       (should (< (- start (float-time)) 10)))))
+
+;; A busy owner re-arms as it lets go, so a sender woken meanwhile
+;; can leave the queue to it; one that may be hung, or can't be asked,
+;; is waited for as before.
+(ert-deftest msl-test-busy-lock-is-left-to-its-owner-only-when-asked ()
+  (msl-test--with-queue
+    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name))))
+      (cl-letf (((symbol-function 'sleep-for)
+                 (lambda (&rest _) (ert-fail "Waited for a busy owner"))))
+        (should-error (mu4e-send-later--call-with-lock #'ignore t)
+                      :type 'mu4e-send-later-busy))
+      (msl-test--with-lock-deadline
+        (should (eq (car (should-error (mu4e-send-later--with-lock t)
+                                       :type 'mu4e-send-later-error))
+                    'mu4e-send-later-error)))
+      ;; Not used for long: its owner may be hung, and won't re-arm.
+      (let ((mu4e-send-later--lock-stale-after 0))
+        (set-file-times lock (time-add (msl-test--own-start) 1))
+        (sleep-for 0.01)
+        (msl-test--with-lock-deadline
+          (should (eq (car (should-error (mu4e-send-later--call-with-lock #'ignore t)
+                                         :type 'mu4e-send-later-error))
+                      'mu4e-send-later-error))))
+      (delete-directory lock t)
+      ;; On another host.
+      (msl-test--hold-lock (emacs-pid) "elsewhere")
+      (msl-test--with-lock-deadline
+        (should (eq (car (should-error (mu4e-send-later--call-with-lock #'ignore t)
+                                       :type 'mu4e-send-later-error))
+                    'mu4e-send-later-error)))
+      (delete-directory lock t)
+      ;; Dead: broken and taken, as before.
+      (msl-test--hold-lock msl-test--dead-pid (system-name) 60)
+      (should (eq 'ran (mu4e-send-later--call-with-lock (lambda () 'ran) t))))))
+
+;; A wake-up that fires while the lock is held leaves what it was for
+;; to the holder, which must re-arm even if what it was doing failed.
+(ert-deftest msl-test-lock-holder-that-fails-still-rearms ()
+  (msl-test--with-queue
+    (let* ((due (car (msl-test--schedule 3600 "Due")))
+           (interrupted (car (msl-test--schedule 7200 "Interrupted")))
+           (time (plist-get (mu4e-send-later--meta due) :due)))
+      (mu4e-send-later--set-meta
+       interrupted (plist-put (mu4e-send-later--meta interrupted) :state 'sending))
+      ;; Due's wake-up has fired, and found the lock busy.
+      (setq msl-test--armed nil)
+      (should-error (mu4e-send-later--update interrupted #'identity) :type 'user-error)
+      (should (equal msl-test--armed (list time)))
+      (should-not msl-test--notified)
+      ;; If that fails too, it says so, and the first error goes on.
+      (setq msl-test--armed nil
+            msl-test--arm-error "systemd is gone")
+      (should (string-match-p
+               "already sent"
+               (cadr (should-error (mu4e-send-later--update "0-000000" #'identity)
+                                   :type 'user-error))))
+      (should (equal (car (car msl-test--notified)) "Scheduled mail won't be sent"))
+      (should (string-match-p "systemd is gone" (cadr (car msl-test--notified))))
+      ;; One that succeeds re-arms once, as it always did.
+      (setq msl-test--arm-error nil
+            msl-test--notified nil)
+      (let ((arms 0))
+        (cl-letf* ((arm (symbol-function 'mu4e-send-later--arm))
+                   ((symbol-function 'mu4e-send-later--arm)
+                    (lambda () (cl-incf arms) (funcall arm))))
+          (mu4e-send-later-reschedule (+ time 60) due))
+        (should (= arms 1))))))
 
 (ert-deftest msl-test-reschedule-after-sending-says-so ()
   (msl-test--with-queue
