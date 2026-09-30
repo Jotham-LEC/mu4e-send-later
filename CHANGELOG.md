@@ -78,6 +78,22 @@ state.
   queue, which nothing removed.
 - **The startup check warned about the login job** when the path of Emacs or of
   the package held a character the unit file or plist escapes.
+- **send-now could report the sender broken.** It arms the wake-up and starts a
+  send too; if the first of them held the queue for over a minute, the second
+  gave up with an urgent "sender broken". A background sender that finds a live
+  sender on this host busy with the queue now leaves it to that one, which
+  re-arms as it finishes, and exits quietly. Whatever holds the queue now
+  re-arms even when what it was doing fails, so a wake-up that fired meanwhile
+  isn't lost. A sender on another host, or one idle for 15 minutes, is waited
+  for as before.
+- **systemd expanded `$` in the paths it was given.** A queue, package or Emacs
+  path with `${VAR}` or `$VAR` in it ran something else. Escaping it as `$$`
+  only works until `systemctl daemon-reload`, which from systemd 254 doubles
+  every `$` in a timer's command, so the command now reaches systemd in
+  environment variables, which it passes as they are, on every version. The
+  login job's unit gives the path of Emacs apart from the command, as systemd
+  expands `$` in one and not the other, and installing it refuses a path systemd
+  won't run, one with quotes or a backslash.
 
 ### Changed
 - The README says what "at most once" covers: a send cut short is never repeated
