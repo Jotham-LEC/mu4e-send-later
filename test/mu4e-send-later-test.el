@@ -1408,9 +1408,10 @@ Each message it reads is appended to DIR/sent, followed by a line
           (should (equal booted (list (concat (mu4e-send-later--launchd-domain) "/" mine)))))
       (delete-directory agents t))))
 
-(defun msl-test--login-job-warnings (installed-from)
+(defun msl-test--login-job-warnings (installed-from &optional then)
   "Warnings about login jobs installed while loaded from INSTALLED-FROM.
-Both a systemd unit and a LaunchAgent are written, to temporary places."
+Both a systemd unit and a LaunchAgent are written, to temporary places.
+THEN, if given, is called after they are written."
   (let* ((config (make-temp-file "msl-config-" t))
          (agents (make-temp-file "msl-agents-" t))
          (process-environment (cons (concat "XDG_CONFIG_HOME=" config) process-environment))
@@ -1430,6 +1431,7 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
               (write-region (mu4e-send-later--plist-xml label (mu4e-send-later--login-command))
                             nil (mu4e-send-later--launchd-plist-file label))))
           (should (equal (funcall library-dir) (mu4e-send-later--library-dir)))
+          (when then (funcall then))
           (mu4e-send-later--check-login-job)
           warnings)
       (delete-directory config t)
@@ -1509,7 +1511,32 @@ Both a systemd unit and a LaunchAgent are written, to temporary places."
             (should-not (msl-test--login-job-warnings library))
             ;; And a moved one still is.
             (should (= 2 (length (msl-test--login-job-warnings
-                                  (file-name-as-directory (expand-file-name "old" odd))))))))
+                                  (file-name-as-directory (expand-file-name "old" odd))))))
+            ;; As is an Emacs that has gone.
+            (let ((warnings (msl-test--login-job-warnings
+                             library
+                             (lambda () (delete-file mu4e-send-later-emacs-program)))))
+              (should (= 2 (length warnings)))
+              (dolist (warning warnings)
+                (should (string-search (concat mu4e-send-later-emacs-program ", which no longer exists")
+                                       warning))))
+            ;; Also in a unit written before 0.3.1, which gave no path.
+            (make-symbolic-link (expand-file-name invocation-name invocation-directory)
+                                mu4e-send-later-emacs-program)
+            (let ((warnings (msl-test--login-job-warnings
+                             library
+                             (lambda ()
+                               (with-temp-file (mu4e-send-later--systemd-login-file)
+                                 (insert (mu4e-send-later--systemd-login-unit-text))
+                                 (goto-char (point-min))
+                                 (should (re-search-forward
+                                          "^ExecStart=\\(@\"\\(?:[^\"\\]\\|\\\\.\\)*\" \\)"))
+                                 (replace-match "" t t nil 1))
+                               (delete-file mu4e-send-later-emacs-program)))))
+              (should (= 2 (length warnings)))
+              (dolist (warning warnings)
+                (should (string-search (concat mu4e-send-later-emacs-program ", which no longer exists")
+                                       warning))))))
       (delete-directory odd t))))
 
 (defvar msl-test--launchd nil
@@ -1689,9 +1716,181 @@ Not in a launchd job, to begin with."
 
 (ert-deftest msl-test-systemd-quoting ()
   (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
-                 "\"/a b/c\\\"d%%e$$f\\\\g\"")))
+                 "\"/a b/c\\\"d%%e$$f\\\\g\""))
+  ;; The program's path isn't expanded, so a $ stays one.
+  (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g" t)
+                 "\"/a b/c\\\"d%%e$f\\\\g\"")))
+
+(defvar msl-test--odd-name "a ${HOME} $x %h \"q' \\ `b`"
+  "A file name that systemd, or a shell, would take for more than a name.")
+
+;; systemd expands `$' in a command's arguments and, after a
+;; daemon-reload, doubles each; the command must reach the program as
+;; given all the same, the Emacs, library and queue directories too.
+(ert-deftest msl-test-systemd-runs-the-command-exactly ()
+  (let* ((dir (make-temp-file "msl-odd-" t))
+         (odd (file-name-as-directory (expand-file-name msl-test--odd-name dir)))
+         (out (expand-file-name "argv" dir))
+         (mu4e-send-later-emacs-program (expand-file-name "emacs" odd))
+         (mu4e-send-later--library-file (expand-file-name "lib/mu4e-send-later.el" odd))
+         (mu4e-send-later-directory (expand-file-name "queue/" odd))
+         (calls nil))
+    (unwind-protect
+        (progn
+          (make-directory odd t)
+          (with-temp-file mu4e-send-later-emacs-program
+            (insert "#!/bin/sh\nprintf '%s\\0' \"$0\" \"$@\" > \"$MSL_TEST_OUT\"\n"))
+          (set-file-modes mu4e-send-later-emacs-program #o755)
+          (cl-letf (((symbol-function 'mu4e-send-later--call)
+                     (lambda (program &rest args) (push (cons program args) calls) "")))
+            (mu4e-send-later--backend-arm 'systemd 2000000000)
+            (mu4e-send-later--backend-run
+             'systemd (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                                "msl-test-send" msl-test--odd-name "")))
+          (should (= (length calls) 2))
+          (pcase-dolist (`(,command ,call)
+                         (list (list (mu4e-send-later--command 'mu4e-send-later-batch-flush)
+                                     (nth 1 calls))
+                               (list (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                                               "msl-test-send" msl-test--odd-name "")
+                                     (nth 0 calls))))
+            (should (equal (car call) "systemd-run"))
+            (let* ((env (delq nil (mapcar (lambda (arg)
+                                            (and (string-prefix-p "--setenv=" arg)
+                                                 (substring arg (length "--setenv="))))
+                                          call)))
+                   (run (cdr (member "--" call))))
+              ;; Nothing systemd would expand, before or after a reload.
+              (should-not (cl-remove-if-not (lambda (arg) (string-match-p "[$%]" arg))
+                                            (cl-remove-if (lambda (arg)
+                                                            (string-prefix-p "--setenv=" arg))
+                                                          call)))
+              (let ((process-environment (append env (list (concat "MSL_TEST_OUT=" out))
+                                                 process-environment)))
+                (should (zerop (apply #'call-process (car run) nil nil nil (cdr run)))))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents-literally out)
+                               (decode-coding-string (buffer-string) 'utf-8))
+                             (mapconcat (lambda (arg) (concat arg "\0")) command ""))))))
+      (delete-directory dir t))))
 
 ;;;; Integration
+
+;; For the integration tests: a queue, library and Emacs whose paths
+;; systemd would expand, and a sendmail that writes to SINK.
+(defmacro msl-test--with-odd-systemd-paths (&rest body)
+  "Run BODY with every path systemd is given made odd."
+  (declare (indent 0) (debug t))
+  `(let* ((dir (make-temp-file "msl-int-" t))
+          (odd (file-name-as-directory (expand-file-name msl-test--odd-name dir)))
+          (mu4e-send-later-directory (expand-file-name "queue/" odd))
+          (mu4e-send-later-emacs-program (expand-file-name "emacs/emacs" odd))
+          (mu4e-send-later--library-file (expand-file-name "lib/mu4e-send-later.el" odd))
+          (mu4e-send-later-backend 'systemd)
+          (mu4e-send-later-mode t)
+          (mu4e-send-later--preflight-ok nil)
+          (sink (expand-file-name "sent" dir))
+          (sendmail-program (expand-file-name "fake-sendmail" odd))
+          (message-send-mail-function #'message-send-mail-with-sendmail)
+          (message-interactive t)
+          (tag (mu4e-send-later--queue-tag)))
+     (unwind-protect
+         (progn
+           (dolist (sub '("emacs" "lib"))
+             (make-directory (expand-file-name sub odd) t))
+           ;; The Emacs itself, not a wrapper that could hide its argv[0].
+           (make-symbolic-link (expand-file-name invocation-name invocation-directory)
+                               mu4e-send-later-emacs-program)
+           (copy-file (locate-library "mu4e-send-later.el") mu4e-send-later--library-file)
+           (with-temp-file sendmail-program
+             (insert (format "#!/bin/sh\ncat > %s\n" (shell-quote-argument sink))))
+           (set-file-modes sendmail-program #o755)
+           ,@body)
+       (ignore-errors (mu4e-send-later--backend-disarm 'systemd))
+       (delete-directory dir t))))
+
+(defun msl-test--systemd-units (tag)
+  "This queue's systemd units, TAG being its tag, as systemctl lists them."
+  (with-temp-buffer
+    (call-process "systemctl" nil t nil "--user" "list-units" "--all"
+                  "--no-legend" (format "mu4e-send-later-%s-*" tag))
+    (string-trim (buffer-string))))
+
+(defun msl-test--wait (seconds test)
+  "Wait up to SECONDS for TEST to return non-nil; return what it last did."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (and (not (funcall test)) (< (float-time) deadline))
+      (sleep-for 0.5)))
+  (funcall test))
+
+(defun msl-test--schedule-odd (seconds subject)
+  "Schedule a message with SUBJECT through the real backend, SECONDS from now."
+  (let ((buffer (msl-test--draft subject)))
+    (with-current-buffer buffer
+      (setq-local message-send-mail-function #'message-send-mail-with-sendmail)
+      (mu4e-send-later (+ (floor (float-time)) seconds)))))
+
+;; With real systemd, and a daemon-reload between arming and firing,
+;; as upgrading the system or home-manager does.
+(ert-deftest msl-test-integration-systemd-odd-paths ()
+  "Schedule through systemd, with $, ${VAR} and % in every path it is given."
+  :tags '(:integration)
+  (skip-unless (equal (getenv "MU4E_SEND_LATER_INTEGRATION") "1"))
+  (skip-unless (mu4e-send-later--systemd-available-p))
+  (msl-test--with-odd-systemd-paths
+    (msl-test--schedule-odd 4 "Odd paths")
+    (should (= 1 (length (mu4e-send-later--ids))))
+    (should (string-match-p "\\.timer" (msl-test--systemd-units tag)))
+    (should (zerop (call-process "systemctl" nil nil nil "--user" "daemon-reload")))
+    (should (msl-test--wait 30 (lambda () (file-exists-p sink))))
+    (should (msl-test--wait 30 (lambda () (not (mu4e-send-later--ids)))))
+    (with-temp-buffer
+      (insert-file-contents sink)
+      (should (search-forward "Subject: Odd paths" nil t)))
+    ;; It re-armed from the odd paths, and left nothing behind.
+    (should (msl-test--wait 30 (lambda () (string-empty-p (msl-test--systemd-units tag)))))))
+
+;; The login job is a unit file, which systemd reads differently.
+(ert-deftest msl-test-integration-systemd-login-job-odd-paths ()
+  "Run the login job's unit, with $, ${VAR} and % in every path it is given."
+  :tags '(:integration)
+  (skip-unless (equal (getenv "MU4E_SEND_LATER_INTEGRATION") "1"))
+  (skip-unless (and (mu4e-send-later--systemd-available-p) (getenv "XDG_RUNTIME_DIR")))
+  ;; systemd refuses a unit file's program with quotes or a backslash.
+  (let ((msl-test--odd-name "a ${HOME} $x %h b"))
+    (msl-test--with-odd-systemd-paths
+      ;; A runtime unit of its own, rather than your login job.
+      (let* ((unit (format "mu4e-send-later-%s-login.service" tag))
+             (file (expand-file-name (concat "systemd/user/" unit) (getenv "XDG_RUNTIME_DIR"))))
+        (unwind-protect
+            (progn
+              ;; Something for it to re-arm, which needs the Emacs it ran as.
+              (msl-test--schedule-odd 3600 "Login")
+              (mu4e-send-later--backend-disarm 'systemd)
+              ;; So it re-arms with the Emacs it was run as, from argv[0].
+              (let ((mu4e-send-later-emacs-program nil))
+                (mu4e-send-later--write-config 'systemd))
+              (should (string-empty-p (msl-test--systemd-units tag)))
+              (make-directory (file-name-directory file) t)
+              (write-region (mu4e-send-later--systemd-login-unit-text) nil file)
+              (should (zerop (call-process "systemctl" nil nil nil "--user" "daemon-reload")))
+              (should (zerop (call-process "systemctl" nil nil nil "--user" "start" unit)))
+              (should (string-match-p "\\.timer" (msl-test--systemd-units tag)))
+              (should-not (file-exists-p sink)))
+          (ignore-errors (delete-file file))
+          (call-process "systemctl" nil nil nil "--user" "daemon-reload")
+          (call-process "systemctl" nil nil nil "--user" "reset-failed" unit))))))
+
+(ert-deftest msl-test-login-job-refuses-a-program-systemd-would ()
+  (let ((mu4e-send-later-emacs-program "/opt/it's/emacs")
+        (process-environment (cons "XDG_CONFIG_HOME=/nonexistent/msl-test" process-environment)))
+    (cl-letf (((symbol-function 'mu4e-send-later--backend) (lambda () 'systemd))
+              ((symbol-function 'file-executable-p) (lambda (_) t))
+              ((symbol-function 'mu4e-send-later--call)
+               (lambda (&rest _) (ert-fail "Installed it"))))
+      (should (string-match-p
+               "quotes"
+               (cadr (should-error (mu4e-send-later-install-login-job) :type 'user-error)))))))
 
 ;;;; mu4e
 

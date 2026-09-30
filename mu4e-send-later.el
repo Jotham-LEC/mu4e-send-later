@@ -492,6 +492,28 @@ such as the one the integration test uses."
   "Name of the systemd units that fire at TIME."
   (format "mu4e-send-later-%s-%d" (mu4e-send-later--queue-tag) time))
 
+;; systemd expands `${VAR}' and `$VAR' in the arguments of a command it
+;; runs, and `$$' to `$'.  Escaping `$' as `$$' doesn't do: from version
+;; 254 on, `systemctl daemon-reload' reads a transient unit's command
+;; back with every `$' doubled, the program's path included (252 and
+;; 253 write it out as `\$'), so a command right before it is wrong
+;; after.  Environment variables are
+;; passed as they are, and `%' isn't expanded in either, so the command
+;; goes in variables, and a shell with no `$' in it runs it from them:
+;; printf makes the `$'s, and eval runs
+;;   exec "$MU4E_SEND_LATER_ARG0" "$MU4E_SEND_LATER_ARG1" ...
+(defun mu4e-send-later--systemd-exec (command)
+  "Arguments that make systemd-run run COMMAND exactly as given."
+  (let ((i -1))
+    (append (mapcar (lambda (arg)
+                      (format "--setenv=MU4E_SEND_LATER_ARG%d=%s" (cl-incf i) arg))
+                    command)
+            (list "--" "/bin/sh" "-c"
+                  (concat "eval `printf 'exec"
+                          (mapconcat (lambda (n) (format " \"\\044MU4E_SEND_LATER_ARG%d\"" n))
+                                     (number-sequence 0 i) "")
+                          "'`")))))
+
 ;; A fresh unit name per wake-up: re-arming happens from inside the
 ;; service the previous timer started, which can't be replaced while
 ;; it runs.  Stopping that timer is safe; it doesn't stop the service.
@@ -502,8 +524,8 @@ such as the one the integration test uses."
          (format "--on-calendar=@%d" time)
          "--timer-property=AccuracySec=1s"
          "--description=Send mail scheduled with mu4e-send-later"
-         "--"
-         (mu4e-send-later--command 'mu4e-send-later-batch-flush)))
+         (mu4e-send-later--systemd-exec
+          (mu4e-send-later--command 'mu4e-send-later-batch-flush))))
 
 (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql systemd)))
   "Cancel every pending systemd user timer wake-up."
@@ -521,7 +543,7 @@ such as the one the integration test uses."
 (cl-defmethod mu4e-send-later--backend-run ((_ (eql systemd)) command)
   "Run COMMAND as a transient user service and return its output."
   (apply #'mu4e-send-later--call "systemd-run" "--user" "--quiet" "--collect"
-         "--wait" "--pipe" "--" command))
+         "--wait" "--pipe" (mu4e-send-later--systemd-exec command)))
 
 (defconst mu4e-send-later--launchd-prefix "com.github.jotham-lec.mu4e-send-later"
   "Prefix of the launchd labels this package creates.")
@@ -1316,10 +1338,13 @@ failed messages are reported."
   (expand-file-name (concat "systemd/user/" mu4e-send-later--systemd-login-unit)
                     (or (getenv "XDG_CONFIG_HOME") "~/.config")))
 
-(defun mu4e-send-later--systemd-quote (arg)
-  "Quote ARG for a systemd ExecStart line."
+(defun mu4e-send-later--systemd-quote (arg &optional path)
+  "Quote ARG for a systemd ExecStart line.
+With PATH, as the path of the program, where systemd takes `$' as it
+is, and \"$$\" would be two."
   (concat "\"" (replace-regexp-in-string
-                "[\"\\%$]" (lambda (c) (if (equal c "%") "%%" (if (equal c "$") "$$" (concat "\\" c))))
+                (if path "[\"\\%]" "[\"\\%$]")
+                (lambda (c) (if (equal c "%") "%%" (if (equal c "$") "$$" (concat "\\" c))))
                 arg t t)
           "\""))
 
@@ -1332,8 +1357,12 @@ failed messages are reported."
   (concat "[Unit]\n"
           "Description=Send mail that fell due while logged out (mu4e-send-later)\n\n"
           "[Service]\nType=oneshot\n"
-          "ExecStart=" (mapconcat #'mu4e-send-later--systemd-quote
-                                  (mu4e-send-later--login-command) " ")
+          ;; The program's path, then all of the command: systemd
+          ;; expands `$' in the program as run, argv[0], but not in its
+          ;; path, so they are given apart, each escaped as it needs.
+          "ExecStart=@" (let ((command (mu4e-send-later--login-command)))
+                          (concat (mu4e-send-later--systemd-quote (car command) t) " "
+                                  (mapconcat #'mu4e-send-later--systemd-quote command " ")))
           "\n\n[Install]\nWantedBy=default.target\n"))
 
 ;;;###autoload
@@ -1343,7 +1372,12 @@ Re-run this if the Emacs executable moves, e.g. after an upgrade."
   (interactive)
   (pcase (mu4e-send-later--backend)
     ('systemd
-     (let ((file (mu4e-send-later--systemd-login-file)))
+     (let ((file (mu4e-send-later--systemd-login-file))
+           (emacs (car (mu4e-send-later--login-command))))
+       ;; A timer's program is a shell, so this is only the login job's.
+       (when (string-match-p "[[:cntrl:]\"'\\*?[]" emacs)
+         (user-error "The login job can't run %s: systemd won't run a program whose path has quotes, backslashes, control characters or any of *?[; set `mu4e-send-later-emacs-program' to a path without"
+                     emacs))
        (make-directory (file-name-directory file) t)
        (let ((coding-system-for-write 'utf-8-unix))
          (write-region (mu4e-send-later--systemd-login-unit-text) nil file nil 'silent))
@@ -1402,7 +1436,9 @@ The library moves when the package is upgraded."
                (emacs (when (re-search-forward
                              (concat (if plist
                                          "<key>ProgramArguments</key>\\s-*<array>\\s-*"
-                                       "ExecStart=")
+                                       ;; The path, then the program as run.
+                                       ;; Not in units from before 0.3.1.
+                                       "ExecStart=\\(?:@\"\\(?:[^\"\\]\\|\\\\.\\)*\" \\)?")
                                      value)
                              nil t)
                         (funcall read)))
