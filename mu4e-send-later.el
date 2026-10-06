@@ -387,10 +387,21 @@ holds the lock re-arms before letting go, even if FN fails."
   (declare (indent 0) (debug t))
   `(mu4e-send-later--call-with-lock (lambda () ,@body)))
 
+(defconst mu4e-send-later--log-max-size 1000000
+  "Bytes a log grows to before it is moved aside, to its .old.")
+
+(defun mu4e-send-later--rotate (file)
+  "Move the log FILE to FILE.old, replacing that, if it has grown too big.
+So it never takes more than twice `mu4e-send-later--log-max-size'."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (when (and size (>= size mu4e-send-later--log-max-size))
+      (ignore-errors (rename-file file (concat file ".old") t)))))
+
 (defun mu4e-send-later--log (format-string &rest args)
   "Append a line built from FORMAT-STRING and ARGS to the queue's log."
   (let ((line (apply #'format format-string args)))
     (ignore-errors
+      (mu4e-send-later--rotate (mu4e-send-later--dir "log"))
       (let ((coding-system-for-write 'utf-8-unix))
         (with-file-modes #o600
           (write-region (format "%s %s\n" (format-time-string "%F %T") line)
@@ -1361,6 +1372,9 @@ UNLESS-BUSY is as for `mu4e-send-later--call-with-lock'."
   (unless noninteractive
     (error "`mu4e-send-later-batch-flush' is for Emacs in batch mode"))
   (mu4e-send-later--batch-setup)
+  ;; launchd appends what we print to it.  Moving it doesn't disturb
+  ;; the copy launchd opened for us; the next run gets a new one.
+  (mu4e-send-later--rotate (mu4e-send-later--dir "launchd.log"))
   (let ((status (condition-case err
                     (if (zerop (mu4e-send-later--flush t)) 0 1)
                   ;; Started while another send runs, by send-now say:

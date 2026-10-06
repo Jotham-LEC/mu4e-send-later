@@ -49,6 +49,9 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   scheduled mail in mu4e, or edit. Where one is missing, the file is still
   written, or removed, for mu to find when it next indexes, and edit opens the
   draft in a buffer of its own.
+- **The log, and launchd's, no longer grow without end.** Once one reaches 1 MB
+  it is moved to its `.old`, replacing the one before. `cancelled/` still keeps
+  every cancelled message until you delete it, as the README now says.
 
 ## [0.3.1] — 2026-09-29
 

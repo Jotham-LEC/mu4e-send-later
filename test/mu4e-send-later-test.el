@@ -357,6 +357,32 @@ Skips the test where org-msg isn't installed, except on CI."
           (should (equal (file-modes file)
                          (if (file-directory-p file) #o700 #o600))))))))
 
+;; Each send, and each wake-up launchd starts, adds to a log.
+(ert-deftest msl-test-logs-are-kept-from-growing-without-end ()
+  (msl-test--with-queue
+    (let ((mu4e-send-later--log-max-size 100)
+          (contents (lambda (name)
+                      (with-temp-buffer
+                        (insert-file-contents (mu4e-send-later--dir name))
+                        (buffer-string)))))
+      (with-temp-file (mu4e-send-later--dir "log")
+        (insert (make-string 99 ?a) "\n"))
+      (with-temp-file (mu4e-send-later--dir "launchd.log")
+        (insert (make-string 99 ?b) "\n"))
+      (mu4e-send-later--log "first")
+      (mu4e-send-later--log "second")
+      (should (string-match-p "\\`[^\n]* first\n[^\n]* second\n\\'" (funcall contents "log")))
+      ;; The last of what came before is kept.
+      (should (equal (funcall contents "log.old") (concat (make-string 99 ?a) "\n")))
+      ;; launchd writes its own, so the sender it starts keeps it short.
+      (let ((command-line-args-left (list (mu4e-send-later--dir))))
+        (cl-letf (((symbol-function 'kill-emacs)
+                   (lambda (&optional status) (throw 'exit status))))
+          (should (eql 0 (catch 'exit (mu4e-send-later-batch-flush))))))
+      (should-not (file-exists-p (mu4e-send-later--dir "launchd.log")))
+      (should (equal (funcall contents "launchd.log.old")
+                     (concat (make-string 99 ?b) "\n"))))))
+
 (ert-deftest msl-test-arm-failure-keeps-draft-and-queue-empty ()
   (msl-test--with-queue
     (setq msl-test--arm-error "no scheduler")

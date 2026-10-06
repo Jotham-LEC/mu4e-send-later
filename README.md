@@ -205,7 +205,11 @@ second time.
 
 Errors are signalled as `mu4e-send-later-backend-error` or
 `mu4e-send-later-send-error`, both children of `mu4e-send-later-error`.
-Everything is logged to `~/.local/state/mu4e-send-later/log`.
+Everything is logged to `~/.local/state/mu4e-send-later/log`. Once it reaches
+1 MB it is moved to `log.old`, replacing the one before, and so is
+`launchd.log`, where launchd writes what the background Emacs prints on macOS.
+Cancelled and edited messages stay in the queue's `cancelled/`, and copies that
+couldn't be filed in `unfiled/`, until you delete them; nothing prunes those.
 
 ## Caveats
 
