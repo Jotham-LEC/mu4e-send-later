@@ -194,7 +194,7 @@ An existing one is made private too, as older versions didn't."
   "Atomically replace FILE with the printed representation of DATA."
   (let ((tmp (concat file ".tmp"))
         (coding-system-for-write 'utf-8-unix))
-    (with-file-modes #o700
+    (with-file-modes #o600
       (with-temp-file tmp
         (insert (mu4e-send-later--print data) "\n")))
     (rename-file tmp file t)))
@@ -392,7 +392,7 @@ holds the lock re-arms before letting go, even if FN fails."
   (let ((line (apply #'format format-string args)))
     (ignore-errors
       (let ((coding-system-for-write 'utf-8-unix))
-        (with-file-modes #o700
+        (with-file-modes #o600
           (write-region (format "%s %s\n" (format-time-string "%F %T") line)
                         nil (mu4e-send-later--dir "log") t 'silent))))
     (when noninteractive (message "mu4e-send-later: %s" line))))
@@ -966,7 +966,8 @@ Called where `message-send-mail-function' would be.  FCC is a list of
       (condition-case err
           (progn
             (with-file-modes #o700
-              (make-directory tmp t)
+              (make-directory tmp t))
+            (with-file-modes #o600
               (save-restriction
                 (widen)
                 (let ((coding-system-for-write

@@ -353,7 +353,9 @@ Skips the test where org-msg isn't installed, except on CI."
                             (expand-file-name "meta.eld" item)
                             (mu4e-send-later--dir "config.eld")
                             (mu4e-send-later--dir "log")))
-          (should (zerop (logand (file-modes file) #o077))))))))
+          ;; And not executable, as nothing in it is a program.
+          (should (equal (file-modes file)
+                         (if (file-directory-p file) #o700 #o600))))))))
 
 (ert-deftest msl-test-arm-failure-keeps-draft-and-queue-empty ()
   (msl-test--with-queue
