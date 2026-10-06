@@ -29,13 +29,13 @@
 (defvar msl-test--notified nil "Notifications shown, newest first.")
 (defvar msl-test-setting nil "A setting the fake send function reads.")
 
-(cl-defmethod mu4e-send-later--backend-arm ((_ (eql test)) time)
+(cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'test)) time)
   (when msl-test--arm-error
     (signal 'mu4e-send-later-backend-error (list msl-test--arm-error)))
   (push time msl-test--armed))
-(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql test)))
+(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'test)))
   (setq msl-test--armed nil))
-(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql test)) time)
+(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql 'test)) time)
   (and msl-test--armed-p (equal (car msl-test--armed) time)))
 
 (defun msl-test-send ()
@@ -1686,11 +1686,11 @@ THEN, if given, is called after they are written."
                          `(progn
                             (advice-add 'mu4e-send-later--backend :override
                                         (lambda () 'probe))
-                            (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql probe))))
-                            (cl-defmethod mu4e-send-later--backend-arm ((_ (eql probe)) _time)
+                            (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'probe))))
+                            (cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'probe)) _time)
                               (princ (format "armed from %s\n"
                                              (mu4e-send-later--library-dir))))
-                            (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql probe)) _time)
+                            (cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql 'probe)) _time)
                               t)
                             (setq mu4e-send-later-directory ,(mu4e-send-later--dir)
                                   mu4e-send-later-mode t)

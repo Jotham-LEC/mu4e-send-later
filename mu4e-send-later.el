@@ -545,7 +545,7 @@ such as the one the integration test uses."
 ;; A fresh unit name per wake-up: re-arming happens from inside the
 ;; service the previous timer started, which can't be replaced while
 ;; it runs.  Stopping that timer is safe; it doesn't stop the service.
-(cl-defmethod mu4e-send-later--backend-arm ((_ (eql systemd)) time)
+(cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'systemd)) time)
   "Wake up to run the queue at TIME, with a systemd user timer."
   (apply #'mu4e-send-later--call "systemd-run" "--user" "--quiet" "--collect"
          (concat "--unit=" (mu4e-send-later--systemd-unit time))
@@ -555,12 +555,12 @@ such as the one the integration test uses."
          (mu4e-send-later--systemd-exec
           (mu4e-send-later--command 'mu4e-send-later-batch-flush))))
 
-(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql systemd)))
+(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'systemd)))
   "Cancel every pending systemd user timer wake-up."
   (mu4e-send-later--call "systemctl" "--user" "stop"
                          (format "mu4e-send-later-%s-*.timer" (mu4e-send-later--queue-tag))))
 
-(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql systemd)) time)
+(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql 'systemd)) time)
   "Non-nil if a systemd user timer wake-up is set for TIME."
   (mu4e-send-later--succeeds-p
    "systemctl" "--user" "is-active" "--quiet"
@@ -568,7 +568,7 @@ such as the one the integration test uses."
 
 ;; Run the preflight as a user service too, so it sees the service
 ;; manager's environment rather than Emacs's.
-(cl-defmethod mu4e-send-later--backend-run ((_ (eql systemd)) command)
+(cl-defmethod mu4e-send-later--backend-run ((_ (eql 'systemd)) command)
   "Run COMMAND as a transient user service and return its output."
   (apply #'mu4e-send-later--call "systemd-run" "--user" "--quiet" "--collect"
          "--wait" "--pipe" (mu4e-send-later--systemd-exec command)))
@@ -675,7 +675,7 @@ meanwhile, as Emacs starting does."
         (mu4e-send-later--launchd-label (1+ time))
       label)))
 
-(cl-defmethod mu4e-send-later--backend-arm ((_ (eql launchd)) time)
+(cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'launchd)) time)
   "Wake up to run the queue at TIME, with a launchd job."
   (let ((label (mu4e-send-later--launchd-job-label time)))
     (mu4e-send-later--launchd-load
@@ -684,7 +684,7 @@ meanwhile, as Emacs starting does."
 
 ;; Booting out the job that is running us would kill us, so the current
 ;; one only loses its plist, and unloads itself once it's done.
-(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql launchd)))
+(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'launchd)))
   "Cancel every pending launchd job wake-up."
   (let ((self (mu4e-send-later--launchd-running-job))
         (dir (mu4e-send-later--launchd-agents-dir)))
@@ -699,7 +699,7 @@ meanwhile, as Emacs starting does."
                                    (concat (mu4e-send-later--launchd-domain) "/" label))))
         (delete-file file)))))
 
-(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql launchd)) time)
+(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql 'launchd)) time)
   "Non-nil if a launchd job wake-up is set for TIME."
   (mu4e-send-later--launchd-loaded-p (mu4e-send-later--launchd-job-label time)))
 
@@ -719,30 +719,30 @@ unloads us, so this comes last."
         (mu4e-send-later--call "launchctl" "bootout"
                                (concat (mu4e-send-later--launchd-domain) "/" label))))))
 
-(cl-defmethod mu4e-send-later--backend-run ((_ (eql launchd)) command)
+(cl-defmethod mu4e-send-later--backend-run ((_ (eql 'launchd)) command)
   "Run COMMAND directly and return its output."
   (apply #'mu4e-send-later--call command))
 
-(cl-defmethod mu4e-send-later--backend-arm ((_ (eql emacs)) time)
+(cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'emacs)) time)
   "Wake up to run the queue at TIME, with a Emacs timer."
   (setq mu4e-send-later--emacs-timer
         (run-at-time (seconds-to-time time) nil #'mu4e-send-later--flush-async)
         mu4e-send-later--emacs-timer-time time))
 
-(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql emacs)))
+(cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'emacs)))
   "Cancel every pending Emacs timer wake-up."
   (when (timerp mu4e-send-later--emacs-timer)
     (cancel-timer mu4e-send-later--emacs-timer))
   (setq mu4e-send-later--emacs-timer nil
         mu4e-send-later--emacs-timer-time nil))
 
-(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql emacs)) time)
+(cl-defmethod mu4e-send-later--backend-armed-p ((_ (eql 'emacs)) time)
   "Non-nil if a Emacs timer wake-up is set for TIME."
   (and (timerp mu4e-send-later--emacs-timer)
        (memq mu4e-send-later--emacs-timer timer-list)
        (eql time mu4e-send-later--emacs-timer-time)))
 
-(cl-defmethod mu4e-send-later--backend-run ((_ (eql emacs)) command)
+(cl-defmethod mu4e-send-later--backend-run ((_ (eql 'emacs)) command)
   "Run COMMAND directly and return its output."
   (apply #'mu4e-send-later--call command))
 
