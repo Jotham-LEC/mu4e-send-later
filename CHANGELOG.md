@@ -34,6 +34,15 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   calendar was worked out in Emacs's zone, but launchd reads it in the system's.
   It is now worked out in the system's. A move west after scheduling still makes
   it late, until something re-arms; see the README.
+- **The copy in your Sent folder was made when you scheduled**, not when the
+  message was sent, so it stayed when you cancelled, or the send failed, and
+  editing and scheduling again made a second one. mu4e marked the message
+  replied to as replied then too. The copy is now made as before but kept with
+  the message, and filed by the background sender once the message has gone
+  out, dated then; if it can't be filed, it is kept in `unfiled/` and you're
+  told, and the message isn't sent again. mu4e is told about it, and marks the
+  message replied to, once it runs. This is for mu4e's way of filing and
+  message.el's default; see the README for what still files when you schedule.
 
 ## [0.3.1] — 2026-09-29
 

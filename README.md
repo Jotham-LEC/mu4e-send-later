@@ -121,6 +121,14 @@ restamps the `Date:` header and calls the stored send function with the stored
 settings. Your init file is not loaded, so the result doesn't depend on the
 state of your interactive session.
 
+The copy for your Sent folder (`Fcc:`) waits too. It is made when you schedule,
+as message.el would make it, and kept with the message; once the message has
+gone out, the background Emacs files it, dated when it was sent: in the maildir
+mu4e chose, or appended to the mbox message.el would append it to. A message
+that is cancelled, or never sent, leaves nothing in Sent. In mu4e, the message
+you replied to is marked replied (or passed, for a forward) then too, once
+mu4e is running in your Emacs, which also tells mu about the new copy.
+
 | Backend | Where | Sends while Emacs is closed | After reboot |
 |---|---|---|---|
 | `systemd` | GNU/Linux with a systemd user manager | yes | when Emacs starts, or at login with the login job |
@@ -180,8 +188,14 @@ just before it's handed to your send function. If the sender dies right then
 (a crash, a power cut), there's no way to know whether the mail server already
 took it, so it is never sent again on its own. The next run marks it failed
 with "may have been sent, please check", with an urgent notification. I'd
-rather tell you than send it twice. Look in your Sent folder or ask the
-recipient, then `send-now` or `cancel` it.
+rather tell you than send it twice. Your Sent folder won't say, as the copy is
+only filed once the send has finished; ask the recipient, or look in what your
+mail provider keeps of sent mail if it does (Gmail does), then `send-now` or
+`cancel` it.
+
+If a message was sent but its copy couldn't be filed (the Sent maildir or mbox
+can't be written, say), it isn't sent again: the copy is kept in the queue's
+`unfiled/`, and you get an urgent notification saying where.
 
 That makes delivery at most once as far as this package can know, not
 absolutely. A send that fails is retried, and your send function only knows
@@ -198,10 +212,11 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 - A crash at the wrong moment means a message you have to check by hand, not
   one sent twice. A send that fails after the server has taken the message,
   though, is retried and arrives twice (see above).
-- Anything that happens *on* send happens when you schedule: Fcc/sent-folder
-  copies, deleting the draft, marking the parent as replied. (Gmail users with
-  `mu4e-sent-messages-behavior` set to `delete` get the Sent copy at the real
-  send time, from Gmail.)
+- The Sent copy waits until the message is sent only when it goes where mu4e or
+  message.el's default would put it (see How it works). An `Fcc:` that pipes to
+  a program, one to an mbox that doesn't exist yet (message.el asks before
+  making it), or one for a `message-fcc-handler-function` of your own is still
+  done when you schedule, as is deleting the draft.
 - The copy in the Scheduled maildir is only a view. Deleting or moving it in
   mu4e doesn't cancel the send, and it comes back on the next sync. Use
   `mu4e-send-later-cancel` on it instead. Flagging or marking it read is fine.

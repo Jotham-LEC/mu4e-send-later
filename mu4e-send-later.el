@@ -72,6 +72,10 @@
 (declare-function mu4e-root-maildir "ext:mu4e-server" ())
 (declare-function mu4e--server-add "ext:mu4e-server" (path))
 (declare-function mu4e--server-remove "ext:mu4e-server" (docid-or-path))
+(declare-function mu4e--server-move "ext:mu4e-server"
+                  (docid-or-msgid &optional maildir flags no-view))
+(declare-function gnus-output-to-mail "gnus-util" (filename &optional ask))
+(declare-function mail-file-babyl-p "mail-utils" (file))
 (declare-function mu4e-message-at-point "ext:mu4e-message" (&optional noerror))
 (declare-function mu4e--draft "ext:mu4e-draft" (compose-type compose-func &optional parent))
 (declare-function mu4e--delimit-headers "ext:mu4e-draft" (&optional undelimit))
@@ -156,6 +160,8 @@ sync doesn't upload it."
               "Couldn't arm the send-later wake-up" 'mu4e-send-later-error)
 (define-error 'mu4e-send-later-send-error
               "Sending a scheduled message failed" 'mu4e-send-later-error)
+(define-error 'mu4e-send-later-fcc-error
+              "Filing the sent copy failed" 'mu4e-send-later-error)
 (define-error 'mu4e-send-later-busy
               "Another sender is busy with the queue" 'mu4e-send-later-error)
 
@@ -811,6 +817,56 @@ A plist of :text, :mode and :file, the file it was saved as.")
         :mode major-mode
         :file buffer-file-name))
 
+(defun mu4e-send-later--fcc-later-p (handler files)
+  "Non-nil if the Fcc copies to FILES can be filed with HANDLER once sent.
+FILES are as the Fcc headers give them.  The background sender files
+copies the way mu4e does, in a maildir, and the way message.el does by
+default, appending to an mbox, but only to one that exists, as making
+one asks first.  Not a pipe, nor with any other handler."
+  (require 'mail-utils)
+  (and files
+       (not (cl-some (lambda (file) (string-match-p "\\`[ \t]*|" file)) files))
+       (pcase handler
+         ('mu4e--fcc-handler t)
+         ('message-output
+          (cl-every (lambda (file)
+                      (setq file (expand-file-name file))
+                      (and (file-regular-p file) (not (mail-file-babyl-p file))))
+                    files)))))
+
+(defun mu4e-send-later--capture-fcc (draft)
+  "The copies the Fcc headers of DRAFT, being sent, would file, or nil.
+A list of (FILE . TEXT), made as message.el makes them, if they can
+wait until the message is sent; nil if there are none, or they can't,
+so are filed now as usual."
+  (with-current-buffer draft
+    (let ((files nil)
+          (copies nil))
+      (save-excursion
+        (save-restriction
+          (message-narrow-to-headers)
+          (goto-char (point-min))
+          (let ((case-fold-search t))
+            (while (re-search-forward "^Fcc:[ \t]*\\(.*\\)" nil t)
+              (push (match-string-no-properties 1) files)))))
+      (when (mu4e-send-later--fcc-later-p message-fcc-handler-function files)
+        ;; message.el's own Fcc, with a handler that only keeps the copy.
+        (let ((message-fcc-handler-function
+               (lambda (file) (push (cons file (buffer-string)) copies))))
+          (message-do-fcc))
+        (nreverse copies)))))
+
+(defun mu4e-send-later--strip-fcc (draft)
+  "Take the Fcc headers out of DRAFT, its copies being kept for later.
+Then message.el files none once it has handed the message over, and
+mu4e, which marks the message replied to once it has filed, doesn't."
+  (with-current-buffer draft
+    (save-excursion
+      (save-restriction
+        (message-narrow-to-headers)
+        (let ((inhibit-read-only t))
+          (message-remove-header "Fcc"))))))
+
 (defun mu4e-send-later--readable-p (value)
   "Non-nil if VALUE survives being printed and read back, as the queue does."
   (condition-case nil
@@ -879,9 +935,11 @@ SEND-FUNCTION is resolved with `mu4e-send-later--effective-send-function'."
                   (list "The background sender failed its preflight check" output))))
       (push key mu4e-send-later--preflight-ok))))
 
-(defun mu4e-send-later--enqueue (time send-function)
+(defun mu4e-send-later--enqueue (time send-function &optional fcc handler)
   "Queue the message in the current buffer for TIME, sent with SEND-FUNCTION.
-Called where `message-send-mail-function' would be.  Return the new ID."
+Called where `message-send-mail-function' would be.  FCC is a list of
+\(FILE . TEXT), copies to file with HANDLER once it is sent, as from
+`mu4e-send-later--capture-fcc'.  Return the new ID."
   (let* ((backend (mu4e-send-later--backend))
          (vars (mu4e-send-later--snapshot))
          (id (format "%d-%06x" time (random #xffffff)))
@@ -898,7 +956,9 @@ Called where `message-send-mail-function' would be.  Return the new ID."
                      :to (mu4e-send-later--header "To")
                      :subject (mu4e-send-later--header "Subject")
                      :draft-mode (plist-get mu4e-send-later--draft :mode)
-                     :draft-file (plist-get mu4e-send-later--draft :file))))
+                     :draft-file (plist-get mu4e-send-later--draft :file)
+                     :fcc (mapcar #'car fcc)
+                     :fcc-handler (and fcc handler))))
     (mu4e-send-later--preflight backend send-function vars)
     (mu4e-send-later--with-lock
       ;; Written in full or not at all: a copy of the message mustn't be
@@ -915,7 +975,13 @@ Called where `message-send-mail-function' would be.  Return the new ID."
               (when mu4e-send-later--draft
                 (let ((coding-system-for-write 'utf-8-unix))
                   (write-region (plist-get mu4e-send-later--draft :text) nil
-                                (expand-file-name "draft" tmp) nil 'silent))))
+                                (expand-file-name "draft" tmp) nil 'silent)))
+              (let ((coding-system-for-write 'utf-8-unix)
+                    (i -1))
+                (dolist (copy fcc)
+                  (write-region (cdr copy) nil
+                                (expand-file-name (format "fcc-%d" (cl-incf i)) tmp)
+                                nil 'silent))))
             (mu4e-send-later--write-data (expand-file-name "meta.eld" tmp) meta)
             ;; The rename is what makes the item visible to a sender.
             (rename-file tmp (mu4e-send-later--item-dir id)))
@@ -978,6 +1044,7 @@ it is read with `org-read-date' and confirmed."
   (let ((time (mu4e-send-later--seconds time))
         (send-function message-send-mail-function)
         (mu4e-send-later--draft (mu4e-send-later--capture-draft))
+        (buffer (current-buffer))
         (id nil))
     (unless (and (symbolp send-function) (fboundp send-function))
       (signal 'mu4e-send-later-error
@@ -991,7 +1058,14 @@ it is read with `org-read-date' and confirmed."
     (when (and (derived-mode-p 'org-msg-edit-mode) (fboundp 'org-msg-sanity-check))
       (org-msg-sanity-check))
     (let ((message-send-mail-function
-           (lambda () (setq id (mu4e-send-later--enqueue time send-function))))
+           (lambda ()
+             ;; The copy for the Sent folder is filed once it is sent.
+             (let ((fcc (mu4e-send-later--capture-fcc buffer)))
+               (setq id (mu4e-send-later--enqueue
+                         time send-function fcc
+                         (buffer-local-value 'message-fcc-handler-function buffer)))
+               (when fcc
+                 (mu4e-send-later--strip-fcc buffer)))))
           ;; Split sends would queue each part separately.
           (message-send-mail-partially-limit nil)
           ;; Otherwise it adds X-Message-SMTP-Method, which sends now.
@@ -1053,8 +1127,8 @@ SEPARATOR ends the headers."
     (when (re-search-forward "^Date:.*\\(?:\n[ \t].*\\)*" nil t)
       (replace-match (concat "Date: " (message-make-date time)) t t))))
 
-(defun mu4e-send-later--send (id)
-  "Send queued item ID now, signalling if that fails."
+(defun mu4e-send-later--send (id &optional time)
+  "Send queued item ID now, dated TIME or now, signalling if that fails."
   (let* ((meta (mu4e-send-later--meta id))
          (send-function (plist-get meta :send-function))
          (vars (plist-get meta :variables)))
@@ -1071,8 +1145,96 @@ SEPARATOR ends the headers."
               ;; Otherwise sendmail is told to mail errors back rather
               ;; than report them, and a failure would look like success.
               (message-interactive t))
-          (mu4e-send-later--restamp-date mail-header-separator)
+          (mu4e-send-later--restamp-date mail-header-separator time)
           (funcall send-function))))))
+
+(defun mu4e-send-later--file-in-maildir (file)
+  "Write the message in this buffer to FILE, in a maildir, as mu4e files it.
+Through the maildir's tmp/, so no one reads it half written, and
+readable only by you, as mbsync makes them."
+  (let* ((maildir (file-name-directory (directory-file-name (file-name-directory file))))
+         (tmp (expand-file-name (concat "tmp/" (file-name-nondirectory file)) maildir)))
+    (with-file-modes #o700
+      (dolist (sub '("cur" "new" "tmp"))
+        (make-directory (expand-file-name sub maildir) t)))
+    (let ((coding-system-for-write 'utf-8-unix))
+      (with-file-modes #o600
+        (write-region nil nil tmp nil 'silent)))
+    (rename-file tmp file t)))
+
+(defun mu4e-send-later--parent-flags ()
+  "Flags to set on what the message in this buffer replies to or forwards.
+An alist of message ID and flags, worked out as mu4e does once it has
+sent a message: the message it replies to is marked replied, or with
+no In-Reply-To, the last one it references is marked passed."
+  (save-restriction
+    (message-narrow-to-head)
+    (let ((in-reply-to (message-field-value "In-Reply-To"))
+          (references (message-field-value "References"))
+          (start 0)
+          last)
+      (if in-reply-to
+          (when (string-match "<\\(.*\\)>" in-reply-to)
+            (list (cons (match-string 1 in-reply-to) "+R-N")))
+        (while (and references
+                    (string-match "<\\([^ <]+@[^ <]+\\)>" references start))
+          (setq last (match-string 1 references)
+                start (match-end 0)))
+        (when last
+          (list (cons last "+P-N")))))))
+
+(defun mu4e-send-later--file (id meta time)
+  "File the copies of sent item ID, described by META, dated TIME.
+Signal `mu4e-send-later-fcc-error' if one can't be."
+  (let ((handler (plist-get meta :fcc-handler))
+        (i -1)
+        (flags nil))
+    (condition-case err
+        (dolist (file (plist-get meta :fcc))
+          (with-temp-buffer
+            (let ((coding-system-for-read 'utf-8-unix))
+              (insert-file-contents (expand-file-name (format "fcc-%d" (cl-incf i))
+                                                      (mu4e-send-later--item-dir id))))
+            ;; Dated as the message that went out.
+            (mu4e-send-later--restamp-date "" time)
+            (if (eq handler 'mu4e--fcc-handler)
+                (progn
+                  (mu4e-send-later--file-in-maildir file)
+                  (setq flags (mu4e-send-later--parent-flags)))
+              ;; As `message-output' would, but appending to the mbox
+              ;; without asking, as it exists.
+              (gnus-output-to-mail file nil))))
+      (error (signal 'mu4e-send-later-fcc-error (list (error-message-string err)))))
+    ;; The Emacs running mu4e tells mu about them, and marks what the
+    ;; message replied to: mu4e may not even be here.  Without this, mu
+    ;; only finds them when it next indexes, and nothing is marked.
+    (when (eq handler 'mu4e--fcc-handler)
+      (condition-case err
+          (progn
+            (with-file-modes #o700
+              (make-directory (mu4e-send-later--dir "filed") t))
+            (mu4e-send-later--write-data (mu4e-send-later--dir "filed" (concat id ".eld"))
+                                         (list :files (plist-get meta :fcc) :flags flags)))
+        (error (mu4e-send-later--log "couldn't tell mu4e %s was filed: %s"
+                                     id (error-message-string err)))))))
+
+(defun mu4e-send-later--keep-unfiled (id meta err)
+  "Keep the copies of sent item ID, described by META, ERR kept from filing.
+They go in unfiled/, out of the queue; if they can't, the item stays,
+and as it is marked `sending', it is reported, not sent again."
+  (let ((kept (mu4e-send-later--dir "unfiled" id)))
+    (condition-case nil
+        (progn
+          (with-file-modes #o700
+            (make-directory (mu4e-send-later--dir "unfiled") t))
+          (rename-file (mu4e-send-later--item-dir id) kept))
+      (error (setq kept (mu4e-send-later--item-dir id))))
+    (mu4e-send-later--notify
+     "Scheduled mail sent, but not filed"
+     (format "%s was sent, but its copy couldn't be filed in %s (%s). It is in %s."
+             (plist-get meta :subject) (string-join (plist-get meta :fcc) ", ")
+             (error-message-string err) kept)
+     t)))
 
 (defun mu4e-send-later--record-failure (id meta err)
   "Record that sending item ID, described by META, failed with ERR.
@@ -1102,13 +1264,14 @@ Schedule a retry, or once they are used up, mark it failed."
 (defun mu4e-send-later--attempt (id)
   "Try to send item ID; return non-nil on success."
   (let* ((meta (mu4e-send-later--meta id))
+         (time (current-time))
          (sent (condition-case err
                    (progn
                      ;; Should we die mid-send, the next flush sees this
                      ;; and doesn't send it again: at most once, loudly.
                      (mu4e-send-later--set-meta
                       id (plist-put (copy-sequence meta) :state 'sending))
-                     (mu4e-send-later--send id)
+                     (mu4e-send-later--send id time)
                      t)
                  (error
                   (let ((reason (error-message-string err)))
@@ -1127,10 +1290,15 @@ Schedule a retry, or once they are used up, mark it failed."
                       nil))))))
     (when sent
       (mu4e-send-later--log "sent %s: %s" id (plist-get meta :subject))
-      ;; A failed cleanup mustn't count as a failed send, which would be
-      ;; retried.  Left marked `sending', the item is reported, not resent.
+      ;; Neither a failure to file the copy nor a failed cleanup may count
+      ;; as a failed send, which would be retried.  Left marked `sending',
+      ;; the item is reported, not resent.
       (condition-case err
-          (delete-directory (mu4e-send-later--item-dir id) t)
+          (progn
+            (mu4e-send-later--file id meta time)
+            (delete-directory (mu4e-send-later--item-dir id) t))
+        (mu4e-send-later-fcc-error
+         (mu4e-send-later--keep-unfiled id meta err))
         (error
          (mu4e-send-later--notify
           "Scheduled mail sent, but still queued"
@@ -1533,10 +1701,28 @@ The library moves when the package is upgraded."
           (write-region nil nil tmp nil 'silent))))
     (rename-file tmp file t)))
 
+(defun mu4e-send-later--tell-mu4e-filed ()
+  "Tell mu4e about the copies of sent mail a background sender filed.
+Add them to mu, and mark what they reply to or forward, as mu4e does
+once it has sent a message."
+  (let ((dir (mu4e-send-later--dir "filed")))
+    (dolist (record (and (file-directory-p dir)
+                         (directory-files dir t "\\`[0-9]+-[0-9a-f]+\\.eld\\'")))
+      (let ((filed (ignore-errors (mu4e-send-later--read-data record))))
+        (dolist (file (plist-get filed :files))
+          ;; Unless mail sync has renamed it since; mu finds it then.
+          (when (and (file-exists-p file) (fboundp 'mu4e--server-add))
+            (mu4e--server-add file)))
+        (when (fboundp 'mu4e--server-move)
+          (pcase-dolist (`(,message-id . ,flags) (plist-get filed :flags))
+            (mu4e--server-move message-id nil flags))))
+      (delete-file record))))
+
 (defun mu4e-send-later--mu4e-sync ()
   "Make `mu4e-send-later-maildir' match the queue, and tell mu4e.
 Does nothing unless mu4e is running."
   (when-let* ((dir (mu4e-send-later--mirror-dir)))
+    (mu4e-send-later--tell-mu4e-filed)
     ;; Readable only by you, as the queue is: it holds whole messages,
     ;; Bcc and all.  Made so if an older version made it otherwise.
     (with-file-modes #o700

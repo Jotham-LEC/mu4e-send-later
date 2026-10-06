@@ -16,6 +16,7 @@
 (require 'mu4e-send-later)
 
 (declare-function mu4e-root-maildir "ext:mu4e-server" ())
+(declare-function mu4e--server-add "ext:mu4e-server" (path))
 (declare-function org-msg-edit-mode "ext:org-msg" ())
 
 ;;;; Fixtures
@@ -788,9 +789,9 @@ Each message it reads is appended to DIR/sent, followed by a line
       (msl-test--make-due id)
       (cl-letf* ((send (symbol-function 'mu4e-send-later--send))
                  ((symbol-function 'mu4e-send-later--send)
-                  (lambda (id)
+                  (lambda (id &rest args)
                     (setq state (plist-get (mu4e-send-later--meta id) :state))
-                    (funcall send id))))
+                    (apply send id args))))
         (should (zerop (mu4e-send-later--flush))))
       (should (eq state 'sending)))))
 
@@ -1028,6 +1029,79 @@ Each message it reads is appended to DIR/sent, followed by a line
       (should (= 1 (mu4e-send-later--flush)))
       (should (string-match-p "msl-no-such-fn"
                               (plist-get (mu4e-send-later--meta id) :last-error))))))
+
+;;;; Filing the sent copy
+
+(defun msl-test--schedule-with-fcc (fcc subject &optional handler)
+  "Schedule a draft with SUBJECT and an Fcc to FCC, filed with HANDLER.
+Return its ID."
+  (let ((buffer (msl-test--draft subject))
+        (message-interactive t))
+    (unwind-protect
+        (with-current-buffer buffer
+          (when handler
+            (setq-local message-fcc-handler-function handler))
+          (goto-char (point-min))
+          (insert "Fcc: " fcc "\n")
+          (mu4e-send-later (+ (floor (float-time)) 3600)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(defun msl-test--date (text)
+  "The Date header in TEXT."
+  (and (string-match "^Date: .*$" text) (match-string 0 text)))
+
+;; A copy in the Sent folder said a message was sent when it had only
+;; been scheduled, and stayed when it was cancelled.
+(ert-deftest msl-test-sent-copy-is-filed-once-sent ()
+  (msl-test--with-queue
+    ;; message.el's default way of filing, in an mbox.
+    (let ((mbox (make-temp-file "msl-sent-")))
+      (unwind-protect
+          (let ((cancelled (msl-test--schedule-with-fcc mbox "Cancelled"))
+                (sent (msl-test--schedule-with-fcc mbox "Sent"))
+                (filed (lambda ()
+                         (with-temp-buffer
+                           (insert-file-contents mbox)
+                           (buffer-string)))))
+            (should (equal (funcall filed) ""))
+            (mu4e-send-later--unschedule cancelled)
+            (msl-test--make-due sent)
+            (should (zerop (mu4e-send-later--flush)))
+            (should-not (mu4e-send-later--ids))
+            (let ((copy (funcall filed)))
+              (should (string-match-p "^Subject: Sent$" copy))
+              (should-not (string-match-p "Cancelled" copy))
+              (should-not (string-match-p "^Fcc:" copy))
+              (should (string-match-p "^Body with" copy))
+              ;; Dated as the message that went out.
+              (should (equal (msl-test--date copy)
+                             (msl-test--date (plist-get (car msl-test--sent) :text))))))
+        (delete-file mbox)))))
+
+;; The message is sent, so it mustn't be sent again; nor may its copy
+;; be lost.
+(ert-deftest msl-test-sent-copy-that-cant-be-filed-is-kept ()
+  (msl-test--with-queue
+    (let* ((dir (make-temp-file "msl-sent-" t))
+           (mbox (expand-file-name "sent" dir)))
+      (unwind-protect
+          (let ((id (progn (write-region "" nil mbox)
+                           (msl-test--schedule-with-fcc mbox "Unfiled"))))
+            ;; Gone by the time it is sent, and nothing can take its place.
+            (delete-file mbox)
+            (make-directory mbox)
+            (msl-test--make-due id)
+            (should (zerop (mu4e-send-later--flush)))
+            (should (= (length msl-test--sent) 1))
+            (should-not (mu4e-send-later--ids))
+            (should (file-exists-p (mu4e-send-later--dir "unfiled" id "fcc-0")))
+            (should (equal (car (car msl-test--notified)) "Scheduled mail sent, but not filed"))
+            (should (string-match-p (regexp-quote (mu4e-send-later--dir "unfiled" id))
+                                    (cadr (car msl-test--notified))))
+            (should (zerop (mu4e-send-later--flush)))
+            (should (= (length msl-test--sent) 1)))
+        (delete-directory dir t)))))
 
 ;;;; Arming
 
@@ -1342,10 +1416,10 @@ Each message it reads is appended to DIR/sent, followed by a line
                     (funcall ids)))
                  (send (symbol-function 'mu4e-send-later--send))
                  ((symbol-function 'mu4e-send-later--send)
-                  (lambda (id)
+                  (lambda (id &rest args)
                     (setq age (float-time (time-since (file-attribute-modification-time
                                                        (file-attributes lock)))))
-                    (funcall send id))))
+                    (apply send id args))))
         (mu4e-send-later--flush))
       (should (< age 60)))))
 
@@ -2030,8 +2104,8 @@ Not in a launchd job, to begin with."
 
 (defmacro msl-test--with-mu4e (&rest body)
   "Run BODY with a fake running mu4e over a temporary root maildir.
-The fake server records adds and removes, and like mu deletes the
-file it removes."
+The fake server records adds, removes and moves, and like mu deletes
+the file it removes."
   (declare (indent 0) (debug t))
   `(let ((root (make-temp-file "msl-mail-" t))
          (msl-test--mu nil)
@@ -2043,7 +2117,10 @@ file it removes."
                ((symbol-function 'mu4e--server-remove)
                 (lambda (path)
                   (setq msl-test--mu (append msl-test--mu (list (list 'remove path))))
-                  (when (file-exists-p path) (delete-file path)))))
+                  (when (file-exists-p path) (delete-file path))))
+               ((symbol-function 'mu4e--server-move)
+                (lambda (message-id &optional _maildir flags _no-view)
+                  (setq msl-test--mu (append msl-test--mu (list (list 'move message-id flags)))))))
        (unwind-protect (progn ,@body)
          (delete-directory root t)))))
 
@@ -2101,6 +2178,52 @@ file it removes."
                                 (msl-test--mirror (car result))))
               (should (equal (file-modes file)
                              (if (file-regular-p file) #o600 #o700))))))))))
+
+(ert-deftest msl-test-mu4e-sent-copy-and-replied-flag-wait-until-sent ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let ((sent (expand-file-name "acct/Sent/cur/1.2.host:2,S" root))
+            (fcc-when-sent 'unset))
+        (cl-letf (((symbol-function 'mu4e--fcc-handler)
+                   ;; As mu4e files a copy.
+                   (lambda (path)
+                     (make-directory (file-name-directory path) t)
+                     (write-region nil nil path nil 'silent)
+                     (mu4e--server-add path))))
+          (let ((id (cl-letf* ((draft (symbol-function 'msl-test--draft))
+                               ((symbol-function 'msl-test--draft)
+                                (lambda (subject)
+                                  (with-current-buffer (funcall draft subject)
+                                    (goto-char (point-min))
+                                    (insert "In-Reply-To: <parent@example.com>\n")
+                                    ;; Where mu4e marks what it replied
+                                    ;; to, if there is an Fcc.
+                                    (add-hook 'message-sent-hook
+                                              (lambda ()
+                                                (setq fcc-when-sent (message-field-value "Fcc")))
+                                              nil t)
+                                    (current-buffer)))))
+                      (msl-test--schedule-with-fcc sent "Re: Plans" 'mu4e--fcc-handler))))
+            (should-not fcc-when-sent)
+            (should-not (file-exists-p sent))
+            (should-not (assoc 'move msl-test--mu))
+            ;; Sent by a background Emacs, which knows nothing of mu4e.
+            (msl-test--make-due id)
+            (cl-letf (((symbol-function 'mu4e-send-later--mu4e-sync) #'ignore))
+              (should (zerop (mu4e-send-later--flush))))
+            (should (equal (file-modes sent) #o600))
+            (with-temp-buffer
+              (insert-file-contents sent)
+              (should (re-search-forward "^Subject: Re: Plans$" nil t))
+              (should-not (search-forward mail-header-separator nil t)))
+            ;; mu4e is told once it runs.
+            (setq msl-test--mu nil)
+            (mu4e-send-later--mu4e-sync)
+            (should (member (list 'add sent) msl-test--mu))
+            (should (member (list 'move "parent@example.com" "+R-N") msl-test--mu))
+            (setq msl-test--mu nil)
+            (mu4e-send-later--mu4e-sync)
+            (should-not msl-test--mu)))))))
 
 (ert-deftest msl-test-mu4e-not-running-leaves-maildir-alone ()
   (msl-test--with-queue
