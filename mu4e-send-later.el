@@ -1737,8 +1737,12 @@ Does nothing unless mu4e is running."
         (let ((id (mu4e-send-later--mirror-id file)))
           (if (and (member id ids) (not (gethash id mirrors)))
               (puthash id file mirrors)
-            ;; Gone from the queue, or a second copy.  mu deletes the file.
-            (mu4e--server-remove file)
+            ;; Gone from the queue, or a second copy.  mu deletes the
+            ;; file; without the means to ask it, mu drops it once it
+            ;; finds it gone.
+            (if (fboundp 'mu4e--server-remove)
+                (mu4e--server-remove file)
+              (delete-file file))
             (unless (member id ids)
               (remhash id mu4e-send-later--mirrored)))))
       (dolist (id ids)
@@ -1750,7 +1754,9 @@ Does nothing unless mu4e is running."
               (unless (and (file-exists-p file)
                            (eql due (gethash id mu4e-send-later--mirrored)))
                 (mu4e-send-later--write-mirror id file)
-                (mu4e--server-add file)
+                ;; Without it, mu finds the file when it next indexes.
+                (when (fboundp 'mu4e--server-add)
+                  (mu4e--server-add file))
                 (puthash id due mu4e-send-later--mirrored)))))))))
 
 (defun mu4e-send-later--mu4e-sync-safely ()
@@ -1791,7 +1797,7 @@ Does nothing unless mu4e is running."
 (defun mu4e-send-later--open-draft (text meta)
   "Open TEXT, a draft queued with META, for editing."
   (let ((file (plist-get meta :draft-file)))
-    (if (and file (fboundp 'mu4e--draft)
+    (if (and file (fboundp 'mu4e--draft) (fboundp 'mu4e--delimit-headers)
              ;; Not one message.el saved itself, outside any maildir.
              (member (file-name-nondirectory
                       (directory-file-name (file-name-directory file)))
@@ -1809,7 +1815,7 @@ Does nothing unless mu4e is running."
               (replace-match "" t t))
             (let ((coding-system-for-write 'utf-8-unix))
               (write-region nil nil path nil 'silent)))
-          (when (mu4e-running-p)
+          (when (and (mu4e-running-p) (fboundp 'mu4e--server-add))
             (mu4e--server-add path))
           (with-current-buffer
               (mu4e--draft 'edit

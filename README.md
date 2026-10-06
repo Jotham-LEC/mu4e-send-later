@@ -224,8 +224,11 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
   appears in a Scheduled list that is already open once you refresh it (`g`).
 - Messages scheduled before the draft was kept (before 2026-09-28) can't be
   edited, only cancelled and written again.
-- mu4e is updated through its internal `mu4e--server-add` and
-  `mu4e--server-remove`, as of mu 1.14.
+- mu4e is updated through its internal `mu4e--server-add`,
+  `mu4e--server-remove` and `mu4e--server-move`, as of mu 1.14. If a version of
+  mu4e renames them, the Scheduled maildir and Sent copies are still written,
+  and mu sees them when it next indexes, but no message is marked replied; edit
+  then opens the draft in a buffer of its own, rather than as mu4e opens one.
 - The background Emacs has no access to secrets unlocked in your session. Most
   sendmail setups are fine, including msmtp with `passwordeval`. smtpmail with
   `~/.authinfo.gpg` needs gpg-agent to already have the passphrase cached.

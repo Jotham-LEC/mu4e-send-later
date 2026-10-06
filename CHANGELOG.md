@@ -44,6 +44,12 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   message replied to, once it runs. This is for mu4e's way of filing and
   message.el's default; see the README for what still files when you schedule.
 
+### Changed
+- **A mu4e that renames its internal functions** no longer breaks showing
+  scheduled mail in mu4e, or edit. Where one is missing, the file is still
+  written, or removed, for mu to find when it next indexes, and edit opens the
+  draft in a buffer of its own.
+
 ## [0.3.1] — 2026-09-29
 
 Fixes from a second and a third review: mail sent more than once, or at the

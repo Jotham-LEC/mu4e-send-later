@@ -2225,6 +2225,39 @@ the file it removes."
             (mu4e-send-later--mu4e-sync)
             (should-not msl-test--mu)))))))
 
+;; mu4e's internal functions, which a mu4e version may rename.
+(ert-deftest msl-test-mu4e-without-its-internals-still-works ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let ((warnings nil))
+        (cl-letf (((symbol-function 'mu4e--server-add) nil)
+                  ((symbol-function 'mu4e--server-remove) nil)
+                  ((symbol-function 'mu4e--draft)
+                   (lambda (&rest _) (ert-fail "Opened as mu4e would without its help")))
+                  ((symbol-function 'mu4e--delimit-headers) nil)
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (push message warnings))))
+          (let* ((drafts (expand-file-name "acct/Drafts/cur/" root))
+                 (buffer (msl-test--draft "Internals"))
+                 (message-interactive t)
+                 (id (with-current-buffer buffer
+                       (make-directory drafts t)
+                       (setq buffer-file-name (expand-file-name "1.2.host:2,DS" drafts))
+                       (mu4e-send-later (+ (floor (float-time)) 3600))))
+                 (file (msl-test--mirror id)))
+            (when (buffer-live-p buffer) (kill-buffer buffer))
+            ;; Shown, for mu to find when it next indexes.
+            (should (file-exists-p file))
+            ;; Edited, in a buffer of its own, and gone from the maildir.
+            (msl-test--in-mu4e-on file #'mu4e-send-later-edit)
+            (should-not (mu4e-send-later--ids))
+            (should-not (file-exists-p file))
+            (let ((draft (car (match-buffers "\\`\\*unsent mail\\*"))))
+              (should draft)
+              (kill-buffer draft))))
+        (should-not warnings)
+        (should-not msl-test--mu)))))
+
 (ert-deftest msl-test-mu4e-not-running-leaves-maildir-alone ()
   (msl-test--with-queue
     (let ((root (make-temp-file "msl-mail-" t)))
