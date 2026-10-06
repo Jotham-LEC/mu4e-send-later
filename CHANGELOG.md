@@ -23,6 +23,12 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   `mu4e-send-later-maildir` and its messages were made with your umask, though
   they hold the whole message, Bcc included. Like the queue, the maildir is now
   readable only by you, and made so if it exists, and its messages too.
+- **Two senders that found the same stale lock could both take it**, and so
+  both send the same message: one could break it and take it between the other
+  checking it was still the stale one and removing it. A stale lock is now moved
+  aside first, which only one sender can do, and only removed if it is still the
+  stale one; if not, it is put back. One with no owner written is still only
+  broken once it is old.
 
 ## [0.3.1] — 2026-09-29
 

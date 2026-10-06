@@ -266,11 +266,13 @@ the start time is worked out from not agreeing with file times.")
   "The directory whose existence is the queue lock."
   (mu4e-send-later--dir ".lock"))
 
-(defun mu4e-send-later--lock-owner ()
-  "Contents of the lock's owner file, or nil if there is none."
+(defun mu4e-send-later--lock-owner (&optional lock)
+  "Contents of the lock's owner file, or nil if there is none.
+LOCK is where the lock is, if not where it belongs."
   (ignore-errors
     (with-temp-buffer
-      (insert-file-contents (expand-file-name "owner" (mu4e-send-later--lock-dir)))
+      (insert-file-contents
+       (expand-file-name "owner" (or lock (mu4e-send-later--lock-dir))))
       (string-trim (buffer-string)))))
 
 (defun mu4e-send-later--lock-status (owner)
@@ -304,6 +306,26 @@ while it runs.  Otherwise the lock is stale once it is old."
   "Non-nil if the lock, held by OWNER, was left behind by a dead sender."
   (eq (mu4e-send-later--lock-status owner) 'stale))
 
+(defun mu4e-send-later--break-lock (owner)
+  "Break the lock, held by OWNER, which was found stale.
+Another sender may have found it stale too, and broken it and taken
+it since, so it is moved aside first, which only one can do, and
+only removed if it is still OWNER's; if not, it is put back."
+  (let* ((lock (mu4e-send-later--lock-dir))
+         (aside (format "%s.broken-%d-%06x" lock (emacs-pid) (random #xffffff))))
+    (when (ignore-errors (rename-file lock aside) t)
+      (if (and (equal (mu4e-send-later--lock-owner aside) owner)
+               ;; One with no owner may be new, its owner yet to be
+               ;; written; moving it doesn't change how old it is.
+               (or owner
+                   (> (float-time (time-since (file-attribute-modification-time
+                                               (file-attributes aside))))
+                      mu4e-send-later--lock-stale-after)))
+          (ignore-errors (delete-directory aside t))
+        (unless (ignore-errors (rename-file aside lock) t)
+          ;; Someone took the lock meanwhile; theirs stands.
+          (ignore-errors (delete-directory aside t)))))))
+
 (defun mu4e-send-later--touch-lock ()
   "Show the lock is still in use, so it isn't taken for stale."
   (ignore-errors (set-file-times (mu4e-send-later--lock-dir))))
@@ -329,10 +351,7 @@ holds the lock re-arms before letting go, even if FN fails."
              (status (mu4e-send-later--lock-status owner)))
         (pcase status
           ;; A sender that died mid-flush leaves its lock behind.
-          ('stale
-           ;; Unless someone else broke it and took it meanwhile.
-           (when (equal owner (mu4e-send-later--lock-owner))
-             (ignore-errors (delete-directory lock t))))
+          ('stale (mu4e-send-later--break-lock owner))
           ('busy
            (when unless-busy
              (signal 'mu4e-send-later-busy (list owner))))))

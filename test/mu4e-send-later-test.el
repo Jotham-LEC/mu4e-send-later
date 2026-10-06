@@ -1123,6 +1123,50 @@ Each message it reads is appended to DIR/sent, followed by a line
         (should (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
         (delete-directory lock t)))))
 
+;; Two senders find the same stale lock.  One breaks it and takes it,
+;; just as the other, having found it stale too, goes to break it.
+(ert-deftest msl-test-stale-lock-is-broken-by-one-sender-only ()
+  (msl-test--with-queue
+    (dolist (taken-by (list (format "%d %s other" (emacs-pid) (system-name))
+                            ;; Just taken: its owner isn't written yet.
+                            nil))
+      (let* ((lock (msl-test--hold-lock msl-test--dead-pid (system-name) 3600))
+             (other nil)
+             (take (lambda (file)
+                     ;; The other sender, as this one moves the lock.
+                     (when (and (not other) (equal (directory-file-name file) lock))
+                       (setq other t)
+                       (delete-directory lock t)
+                       (make-directory lock)
+                       (when taken-by
+                         (write-region (concat taken-by "\n") nil
+                                       (expand-file-name "owner" lock)))))))
+        (cl-letf* ((delete (symbol-function 'delete-directory))
+                   (rename (symbol-function 'rename-file))
+                   (now (float-time))
+                   (float-time* (symbol-function 'float-time))
+                   ((symbol-function 'delete-directory)
+                    (lambda (dir &rest args)
+                      (funcall take dir)
+                      (apply delete dir args)))
+                   ((symbol-function 'rename-file)
+                    (lambda (file &rest args)
+                      (funcall take file)
+                      (apply rename file args)))
+                   ;; Wait a minute, without waiting.
+                   ((symbol-function 'float-time)
+                    (lambda (&optional time)
+                      (if time (funcall float-time* time) (cl-incf now 1))))
+                   ((symbol-function 'sleep-for) #'ignore))
+          (should-error (mu4e-send-later--with-lock (ert-fail "Both senders hold the lock"))
+                        :type 'mu4e-send-later-error))
+        (should other)
+        ;; The other sender's lock is where it was, as it was.
+        (should (file-directory-p lock))
+        (should (equal (mu4e-send-later--lock-owner) taken-by))
+        (should-not (directory-files (mu4e-send-later--dir) nil "\\`\\.lock\\.broken-"))
+        (delete-directory lock t)))))
+
 (ert-deftest msl-test-lock-writes-its-owner-and-keeps-others-locks ()
   (msl-test--with-queue
     (let ((lock (mu4e-send-later--dir ".lock")))
