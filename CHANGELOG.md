@@ -29,6 +29,11 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   aside first, which only one sender can do, and only removed if it is still the
   stale one; if not, it is put back. One with no owner written is still only
   broken once it is old.
+- **launchd: mail went out hours late when Emacs's time zone wasn't the
+  system's**, as with `TZ` set for Emacs alone or `set-time-zone-rule`: the job's
+  calendar was worked out in Emacs's zone, but launchd reads it in the system's.
+  It is now worked out in the system's. A move west after scheduling still makes
+  it late, until something re-arms; see the README.
 
 ## [0.3.1] — 2026-09-29
 

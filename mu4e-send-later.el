@@ -601,8 +601,9 @@ such as the one the integration test uses."
      "  </array>\n"
      (if time
          ;; launchd has minute resolution and no year, so round up to the
-         ;; next whole minute; the job disarms itself after running.
-         (let ((d (decode-time (seconds-to-time (* 60 (ceiling time 60))))))
+         ;; next whole minute; the job disarms itself after running.  Its
+         ;; calendar is the system's wall clock, whatever Emacs's TZ.
+         (let ((d (decode-time (seconds-to-time (* 60 (ceiling time 60))) 'wall)))
            (format (concat "  <key>StartCalendarInterval</key>\n  <dict>\n"
                            "    <key>Month</key><integer>%d</integer>\n"
                            "    <key>Day</key><integer>%d</integer>\n"
@@ -657,10 +658,12 @@ XPC_SERVICE_NAME, all that older ones have, isn't always the label."
 
 (defun mu4e-send-later--launchd-job-label (time)
   "Label of the job to arm for TIME: TIME's, unless that job is running us.
-Then it fired early, as it does when the clock moves to a zone further
-east or back an hour as summer time ends, launchd's calendar being in
-local time.  It can't be reloaded from inside, and unloads itself once
-it is done, so the job is armed for a second later instead."
+Then it fired early, as it does when the system clock moves to a zone
+further east or back an hour as summer time ends, launchd's calendar
+being the system's local time.  It can't be reloaded from inside, and
+unloads itself once it is done, so the job is armed for a second later
+instead.  A move west makes it fire late, unless something re-arms
+meanwhile, as Emacs starting does."
   (let ((label (mu4e-send-later--launchd-label time)))
     (if (equal label (mu4e-send-later--launchd-running-job))
         (mu4e-send-later--launchd-label (1+ time))

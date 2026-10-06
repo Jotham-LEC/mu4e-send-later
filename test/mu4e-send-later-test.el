@@ -1466,6 +1466,27 @@ That is, after the queue is listed and before ID is read."
     (should (string-match-p "RunAtLoad"
                             (mu4e-send-later--plist-xml "a.b" '("/x/emacs"))))))
 
+;; launchd's calendar is the system's wall clock, which Emacs's own time
+;; zone, from TZ or `set-time-zone-rule', needn't be.
+(ert-deftest msl-test-launchd-calendar-is-in-the-systems-time-zone ()
+  (let* ((time (+ (* 60 (ceiling (float-time) 60)) 3600))
+         (system (decode-time (seconds-to-time time) 'wall))
+         (tz (getenv "TZ")))
+    (unwind-protect
+        (progn
+          ;; Ahead of the system's by many hours.
+          (set-time-zone-rule (if (> (decoded-time-zone system) 0) "<-12>+12" "<+14>-14"))
+          (should-not (equal (decoded-time-hour (decode-time (seconds-to-time time)))
+                             (decoded-time-hour system)))
+          (should (string-match-p
+                   (format (concat "<key>Day</key><integer>%d</integer>\n"
+                                   "    <key>Hour</key><integer>%d</integer>\n"
+                                   "    <key>Minute</key><integer>%d</integer>")
+                           (decoded-time-day system) (decoded-time-hour system)
+                           (decoded-time-minute system))
+                   (mu4e-send-later--plist-xml "a.b" '("/x/emacs") time))))
+      (set-time-zone-rule tz))))
+
 (ert-deftest msl-test-wake-up-names-belong-to-their-queue ()
   (let* ((names (lambda (dir)
                   (let ((mu4e-send-later-directory dir))
@@ -1818,7 +1839,7 @@ Not in a launchd job, to begin with."
         ;; For when the message is due.
         (with-temp-buffer
           (insert-file-contents (concat agents "/" (car (car msl-test--launchd)) ".plist"))
-          (let ((d (decode-time (seconds-to-time (* 60 (ceiling due 60))))))
+          (let ((d (decode-time (seconds-to-time (* 60 (ceiling due 60))) 'wall)))
             (should (search-forward (format "<key>Hour</key><integer>%d</integer>\n    <key>Minute</key><integer>%d</integer>"
                                             (decoded-time-hour d) (decoded-time-minute d))
                                     nil t))))))))

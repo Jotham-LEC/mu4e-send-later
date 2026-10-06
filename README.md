@@ -232,6 +232,10 @@ Everything is logged to `~/.local/state/mu4e-send-later/log`.
 - The launchd backend is tested end to end in CI, on GitHub's macOS runners,
   but not yet on a Mac in daily use; reports welcome. launchd has minute
   resolution, so on macOS mail goes out up to a minute late.
+- launchd's calendar is the Mac's local time. If its time zone moves west after
+  you schedule, as when you fly from London to New York, mail goes out late by
+  the difference, unless Emacs starts meanwhile or you run `M-x
+  mu4e-send-later-check`, either of which re-arms it. A move east is fine.
 
 ## Alternatives
 
