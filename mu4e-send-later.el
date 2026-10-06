@@ -1,8 +1,8 @@
 ;;; mu4e-send-later.el --- Schedule mail to be sent later -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Jotham Lim
+;; Copyright (C) 2026 Jotham Lim Ee Chen
 
-;; Author: Jotham Lim <jotham@cothink.ing>
+;; Author: Jotham Lim Ee Chen <jotham@cothink.ing>
 ;; Assisted-by: Claude:claude-opus-5-5
 ;; Version: 0.3.1
 ;; Package-Requires: ((emacs "29.1"))
