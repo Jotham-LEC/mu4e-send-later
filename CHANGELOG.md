@@ -11,6 +11,10 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   check that a setting can be stored for the background sender printed it with
   them, so a long or deep list came back cut short and scheduling failed. It is
   now printed in full, as the queue stores it.
+- **Mail sent in the background while a command read the queue** made it fail
+  with a raw `file-missing` error: the startup check, before it sent overdue
+  mail, the list, as it refreshed on its own, and cancel. The message is now
+  taken as gone: left out, or for cancel, said to have been sent.
 
 ## [0.3.1] — 2026-09-29
 

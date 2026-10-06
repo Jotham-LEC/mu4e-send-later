@@ -1282,7 +1282,8 @@ Call ON-EXIT with the exit status when it finishes."
   (interactive)
   (let (overdue failed)
     (dolist (id (mu4e-send-later--ids))
-      (let ((meta (mu4e-send-later--checked-meta id t)))
+      ;; Unless it was sent since the queue was listed.
+      (let ((meta (ignore-error file-missing (mu4e-send-later--checked-meta id t))))
         (pcase (plist-get meta :state)
           ('nil)
           ('failed (push meta failed))
@@ -1672,7 +1673,9 @@ Refuse if a send of ID was interrupted, as it may have gone out."
   "Unschedule the message at point, keeping a copy in cancelled/."
   (interactive)
   (let* ((id (mu4e-send-later--id-at-point))
-         (meta (mu4e-send-later--checked-meta id)))
+         (meta (condition-case nil
+                   (mu4e-send-later--checked-meta id)
+                 (file-missing (mu4e-send-later--gone)))))
     (when (yes-or-no-p (format "Cancel \"%s\"? " (or (plist-get meta :subject) id)))
       ;; It may have been sent while you were asked.
       (condition-case nil
@@ -1787,9 +1790,12 @@ TIME is as for `mu4e-send-later'."
 (defun mu4e-send-later--list-refresh ()
   "Reload the queue into the list buffer."
   (setq tabulated-list-entries
-        (mapcar (lambda (id)
-                  (list id (mu4e-send-later--list-row (mu4e-send-later--checked-meta id))))
-                (mu4e-send-later--ids))))
+        (delq nil (mapcar (lambda (id)
+                            ;; Unless it was sent since the queue was listed.
+                            (ignore-error file-missing
+                              (list id (mu4e-send-later--list-row
+                                        (mu4e-send-later--checked-meta id)))))
+                          (mu4e-send-later--ids)))))
 
 ;;;###autoload
 (defun mu4e-send-later-list ()

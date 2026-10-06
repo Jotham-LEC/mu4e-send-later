@@ -1325,6 +1325,59 @@ Each message it reads is appended to DIR/sent, followed by a line
       (should (= (length warnings) 1))
       (should (string-match-p "Broken — boom" (car warnings))))))
 
+(defmacro msl-test--with-sent-after-listing (id &rest body)
+  "Run BODY with ID sent by a background sender each time the queue is listed.
+That is, after the queue is listed and before ID is read."
+  (declare (indent 1) (debug t))
+  `(cl-letf* ((ids (symbol-function 'mu4e-send-later--ids))
+              ((symbol-function 'mu4e-send-later--ids)
+               (lambda ()
+                 (prog1 (funcall ids)
+                   (delete-directory (mu4e-send-later--item-dir ,id) t)))))
+     ,@body))
+
+;; A background sender can send a message, taking it out of the queue,
+;; between a command listing the queue and reading what it listed.
+(ert-deftest msl-test-mail-sent-meanwhile-is-taken-as-gone ()
+  (msl-test--with-queue
+    (let ((sent (car (msl-test--schedule 1800 "Sent meanwhile")))
+          (overdue (car (msl-test--schedule 3600 "Overdue")))
+          (flushed nil) (warnings nil))
+      (msl-test--make-due overdue)
+      (cl-letf (((symbol-function 'mu4e-send-later--flush-async)
+                 (lambda (&rest _) (setq flushed t)))
+                ((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        ;; At startup, overdue mail is still sent.
+        (msl-test--with-sent-after-listing sent
+          (mu4e-send-later-check))
+        (should flushed)
+        (should-not warnings)
+        (setq sent (car (msl-test--schedule 1800 "Sent meanwhile")))
+        ;; The list leaves it out, rather than failing or calling it
+        ;; unreadable.
+        (mu4e-send-later-list)
+        (unwind-protect
+            (with-current-buffer "*mu4e-send-later*"
+              (msl-test--with-sent-after-listing sent
+                (revert-buffer))
+              (should (equal (mapcar #'car tabulated-list-entries) (list overdue))))
+          (kill-buffer "*mu4e-send-later*"))
+        ;; Cancelling it says it was sent.
+        (setq sent (car (msl-test--schedule 1800 "Sent meanwhile")))
+        (cl-letf* ((at-point (symbol-function 'mu4e-send-later--id-at-point))
+                   ((symbol-function 'mu4e-send-later--id-at-point)
+                    (lambda ()
+                      (prog1 (funcall at-point)
+                        (delete-directory (mu4e-send-later--item-dir sent) t))))
+                   ((symbol-function 'yes-or-no-p)
+                    (lambda (_) (ert-fail "Asked to cancel what was sent"))))
+          (should (string-match-p
+                   "already sent"
+                   (cadr (should-error (msl-test--in-list "Sent meanwhile"
+                                                          #'mu4e-send-later-cancel)
+                                       :type 'user-error)))))))))
+
 (ert-deftest msl-test-list-shows-queue ()
   (msl-test--with-queue
     (msl-test--schedule 3600 "Listed")
