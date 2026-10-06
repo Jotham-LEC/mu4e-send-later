@@ -47,7 +47,19 @@ jobs:
         env:
           LOCAL_REPO: ${{ github.workspace }}
           RECIPE: (mu4e-send-later :fetcher github :repo "Jotham-LEC/mu4e-send-later")
-          WARN_IS_ERROR: true
+          # Warnings are checked below instead, all but one of them fatal.
+          WARN_IS_ERROR: false
           # Not on MELPA yet.
           EXIST_OK: false
-        run: echo "$GITHUB_REF" && make -C ~/melpazoid
+        # melpazoid warns that a package named mu4e-* should require mu4e,
+        # but mu4e ships with mu and is on no package archive, so nothing
+        # could install it; mu4e packages on MELPA leave it out too.  Any
+        # other warning still fails the job.
+        run: |
+          set -o pipefail
+          echo "$GITHUB_REF"
+          make -C ~/melpazoid 2>&1 | tee melpazoid.log
+          if grep $'\e\\[33m' melpazoid.log | grep -v 'does not depend on `mu4e`'; then
+            echo "melpazoid warned" >&2
+            exit 1
+          fi
