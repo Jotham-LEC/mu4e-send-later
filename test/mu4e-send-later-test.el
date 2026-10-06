@@ -446,6 +446,18 @@ Skips the test where org-msg isn't installed, except on CI."
             (should-not (mu4e-send-later--ids)))
         (kill-buffer buffer)))))
 
+;; Printed with the user's `print-length', a long list came back cut
+;; short, and so looked unreadable.
+(ert-deftest msl-test-print-settings-dont-make-a-setting-unreadable ()
+  (msl-test--with-queue
+    (let* ((msl-test-setting '("a" ("b" ("c" ("d"))) "e\nf"))
+           (print-length 1)
+           (print-level 1)
+           (print-escape-newlines nil)
+           (id (car (msl-test--schedule 3600))))
+      (should (equal (plist-get (mu4e-send-later--meta id) :variables)
+                     '((msl-test-setting "a" ("b" ("c" ("d"))) "e\nf")))))))
+
 (ert-deftest msl-test-anonymous-send-function-is-an-error ()
   (msl-test--with-queue
     (let ((buffer (msl-test--draft)))

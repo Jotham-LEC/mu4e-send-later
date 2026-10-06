@@ -6,6 +6,12 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+### Fixed
+- **A `print-length` or `print-level` of your own refused valid settings.** The
+  check that a setting can be stored for the background sender printed it with
+  them, so a long or deep list came back cut short and scheduling failed. It is
+  now printed in full, as the queue stores it.
+
 ## [0.3.1] — 2026-09-29
 
 Fixes from a second and a third review: mail sent more than once, or at the

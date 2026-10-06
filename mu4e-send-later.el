@@ -177,17 +177,20 @@ An existing one is made private too, as older versions didn't."
       (make-directory dir t))
     (set-file-modes dir #o700)))
 
+(defun mu4e-send-later--print (data)
+  "The printed representation of DATA, in full whatever the print settings."
+  (let ((print-length nil)
+        (print-level nil)
+        (print-escape-newlines t))
+    (prin1-to-string data)))
+
 (defun mu4e-send-later--write-data (file data)
   "Atomically replace FILE with the printed representation of DATA."
   (let ((tmp (concat file ".tmp"))
-        (print-length nil)
-        (print-level nil)
-        (print-escape-newlines t)
         (coding-system-for-write 'utf-8-unix))
     (with-file-modes #o700
       (with-temp-file tmp
-        (prin1 data (current-buffer))
-        (insert "\n")))
+        (insert (mu4e-send-later--print data) "\n")))
     (rename-file tmp file t)))
 
 (defun mu4e-send-later--read-data (file)
@@ -787,9 +790,9 @@ A plist of :text, :mode and :file, the file it was saved as.")
         :file buffer-file-name))
 
 (defun mu4e-send-later--readable-p (value)
-  "Non-nil if VALUE survives being printed and read back."
+  "Non-nil if VALUE survives being printed and read back, as the queue does."
   (condition-case nil
-      (equal value (car (read-from-string (prin1-to-string value))))
+      (equal value (car (read-from-string (mu4e-send-later--print value))))
     (error nil)))
 
 (defun mu4e-send-later--snapshot ()
