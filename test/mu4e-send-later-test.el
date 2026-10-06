@@ -2019,6 +2019,24 @@ file it removes."
         (mu4e-send-later--mu4e-sync)
         (should (= (length msl-test--mu) 1))))))
 
+;; It holds the whole message, Bcc and all, as the queue does.
+(ert-deftest msl-test-mu4e-copy-is-private ()
+  (msl-test--with-queue
+    (msl-test--with-mu4e
+      (let ((maildir (expand-file-name "scheduled/" root)))
+        ;; Left readable by an older version, and a lax umask.
+        (with-file-modes #o755
+          (make-directory maildir)
+          (let ((result (msl-test--schedule 3600 "Private")))
+            (kill-buffer (cdr result))
+            (dolist (file (list maildir
+                                (expand-file-name "cur" maildir)
+                                (expand-file-name "new" maildir)
+                                (expand-file-name "tmp" maildir)
+                                (msl-test--mirror (car result))))
+              (should (equal (file-modes file)
+                             (if (file-regular-p file) #o600 #o700))))))))))
+
 (ert-deftest msl-test-mu4e-not-running-leaves-maildir-alone ()
   (msl-test--with-queue
     (let ((root (make-temp-file "msl-mail-" t)))

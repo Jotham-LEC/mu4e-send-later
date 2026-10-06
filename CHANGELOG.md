@@ -19,6 +19,10 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   wasn't loaded yet, as their modes aren't autoloaded, and left an empty buffer
   behind. It is now loaded first, and if it can't be, the draft opens in
   `message-mode`. A draft that can't be opened leaves no buffer behind.
+- **The copies of scheduled mail shown in mu4e could be read by other users**:
+  `mu4e-send-later-maildir` and its messages were made with your umask, though
+  they hold the whole message, Bcc included. Like the queue, the maildir is now
+  readable only by you, and made so if it exists, and its messages too.
 
 ## [0.3.1] — 2026-09-29
 

@@ -1507,15 +1507,21 @@ The library moves when the package is upgraded."
       (re-search-forward (concat "^" (regexp-quote (plist-get meta :separator)) "$"))
       (replace-match "" t t)
       (let ((coding-system-for-write 'no-conversion))
-        (write-region nil nil tmp nil 'silent)))
+        (with-file-modes #o600
+          (write-region nil nil tmp nil 'silent))))
     (rename-file tmp file t)))
 
 (defun mu4e-send-later--mu4e-sync ()
   "Make `mu4e-send-later-maildir' match the queue, and tell mu4e.
 Does nothing unless mu4e is running."
   (when-let* ((dir (mu4e-send-later--mirror-dir)))
-    (dolist (sub '("cur" "new" "tmp"))
-      (make-directory (expand-file-name (concat "../" sub) dir) t))
+    ;; Readable only by you, as the queue is: it holds whole messages,
+    ;; Bcc and all.  Made so if an older version made it otherwise.
+    (with-file-modes #o700
+      (dolist (sub '("cur" "new" "tmp"))
+        (make-directory (expand-file-name (concat "../" sub) dir) t)))
+    (dolist (sub '("." "cur" "new" "tmp"))
+      (set-file-modes (expand-file-name (concat "../" sub) dir) #o700))
     (let ((ids (mu4e-send-later--ids))
           (mirrors (make-hash-table :test #'equal)))
       ;; By ID, not by name: mu4e renames the file when its flags change.
