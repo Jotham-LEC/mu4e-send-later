@@ -1611,10 +1611,22 @@ Does nothing unless mu4e is running."
                 (org-msg-edit-mode)
                 (setq-local user-mail-address address))
               (set-buffer-modified-p nil))))
-      (pop-to-buffer (generate-new-buffer "*unsent mail*"))
-      (insert text)
-      (funcall (or (plist-get meta :draft-mode) #'message-mode))
-      (set-buffer-modified-p nil))))
+      (let ((mode (plist-get meta :draft-mode))
+            (buffer (generate-new-buffer "*unsent mail*")))
+        ;; Neither mode is autoloaded, so may not be defined yet.
+        (unless (fboundp mode)
+          (pcase mode
+            ('mu4e-compose-mode (require 'mu4e nil t))
+            ('org-msg-edit-mode (require 'org-msg nil t))))
+        (condition-case err
+            (with-current-buffer buffer
+              (insert text)
+              (funcall (if (fboundp mode) mode #'message-mode))
+              (set-buffer-modified-p nil))
+          ((error quit)
+           (kill-buffer buffer)
+           (signal (car err) (cdr err))))
+        (pop-to-buffer buffer)))))
 
 ;;;; Acting on scheduled mail
 

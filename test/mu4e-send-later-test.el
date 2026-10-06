@@ -2378,6 +2378,36 @@ file it removes."
             (should (equal (mu4e-send-later--ids) (list id))))
         (kill-buffer "*mu4e-send-later*")))))
 
+;; Scheduled from mu4e, edited in an Emacs that hasn't loaded mu4e, or
+;; no longer has it.
+(ert-deftest msl-test-edit-falls-back-to-message-mode ()
+  (msl-test--with-queue
+    (let ((load-path (seq-remove (lambda (dir) (string-match-p "mu4e" dir)) load-path))
+          (unsent (lambda () (match-buffers "\\`\\*unsent mail\\*"))))
+      (should-not (fboundp 'mu4e-compose-mode))
+      (let* ((id (car (msl-test--schedule 3600 "From mu4e")))
+             (meta (mu4e-send-later--meta id)))
+        (mu4e-send-later--set-meta id (plist-put meta :draft-mode 'mu4e-compose-mode))
+        (msl-test--edit-in-list "From mu4e")
+        (should-not (mu4e-send-later--ids))
+        (let ((draft (car (funcall unsent))))
+          (should draft)
+          (with-current-buffer draft
+            (should (eq major-mode 'message-mode))
+            (goto-char (point-min))
+            (should (search-forward "Subject: From mu4e\n" nil t)))
+          (kill-buffer draft)))
+      ;; A mode that fails leaves no buffer behind, and the message as it was.
+      (let* ((id (car (msl-test--schedule 3600 "Failing mode")))
+             (meta (mu4e-send-later--meta id)))
+        (mu4e-send-later--set-meta
+         id (plist-put meta :draft-mode 'msl-test-failing-mode))
+        (cl-letf (((symbol-function 'msl-test-failing-mode)
+                   (lambda () (error "Mode failed"))))
+          (should-error (msl-test--edit-in-list "Failing mode")))
+        (should (equal (mu4e-send-later--ids) (list id)))
+        (should-not (funcall unsent))))))
+
 (ert-deftest msl-test-integration-end-to-end ()
   "Schedule through a real systemd timer or launchd job and a fake sendmail."
   :tags '(:integration)

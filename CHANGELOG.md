@@ -15,6 +15,10 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   with a raw `file-missing` error: the startup check, before it sent overdue
   mail, the list, as it refreshed on its own, and cancel. The message is now
   taken as gone: left out, or for cancel, said to have been sent.
+- **Edit failed for mail scheduled from mu4e or org-msg** when that package
+  wasn't loaded yet, as their modes aren't autoloaded, and left an empty buffer
+  behind. It is now loaded first, and if it can't be, the draft opens in
+  `message-mode`. A draft that can't be opened leaves no buffer behind.
 
 ## [0.3.1] — 2026-09-29
 
