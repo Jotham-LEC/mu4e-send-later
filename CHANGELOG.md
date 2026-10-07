@@ -6,6 +6,12 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+### Fixed
+- **Mail sent by SMTP still couldn't be scheduled on a machine with no sendmail.**
+  0.4.1 stopped scheduling itself from looking for `sendmail-program`, but the trial
+  run of the background Emacs, which scheduling waits on, still refused one it
+  couldn't run. It no longer looks for it either when the mail goes by SMTP.
+
 ## [0.4.1] — 2026-10-07
 
 ### Fixed

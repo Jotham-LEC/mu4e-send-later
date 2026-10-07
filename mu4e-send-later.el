@@ -1423,7 +1423,11 @@ UNLESS-BUSY is as for `mu4e-send-later--call-with-lock'."
     (when problem
       (message "mu4e-send-later: %s" problem)
       (kill-emacs 1))
-    (unless (or (string-empty-p program) (file-executable-p program))
+    ;; SMTP never runs it, so a machine with no sendmail can still send.
+    (unless (or (string-empty-p program)
+                (mu4e-send-later--smtp-p
+                 (mu4e-send-later--effective-send-function send-function))
+                (file-executable-p program))
       (message "mu4e-send-later: %s isn't executable" program)
       (kill-emacs 1))
     (unless (and (ignore-errors (mu4e-send-later--make-queue-dir) t)

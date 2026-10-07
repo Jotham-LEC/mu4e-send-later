@@ -611,6 +611,31 @@ Skips the test where org-msg isn't installed, except on CI."
                                                "message--default-send-mail-function" ""
                                                "smtpmail-send-it"))))))
 
+(ert-deftest msl-test-preflight-needs-no-sendmail-for-smtp ()
+  ;; The background Emacs itself, with no stubs: sending by SMTP never runs
+  ;; `sendmail-program', so one that isn't there mustn't fail the check.
+  (msl-test--with-queue
+    (should (string-match-p
+             "preflight ok"
+             (mu4e-send-later--backend-run
+              'emacs (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                               "message-use-send-mail-function"
+                                               "no-such-sendmail-xyz"
+                                               "smtpmail-send-it"))))
+    (should (string-match-p
+             "preflight ok"
+             (mu4e-send-later--backend-run
+              'emacs (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                               "message--default-send-mail-function"
+                                               "no-such-sendmail-xyz"
+                                               "smtpmail-send-it"))))
+    (should-error
+     (mu4e-send-later--backend-run
+      'emacs (mu4e-send-later--command 'mu4e-send-later-batch-preflight
+                                       "message-send-mail-with-sendmail"
+                                       "no-such-sendmail-xyz" ""))
+     :type 'mu4e-send-later-backend-error)))
+
 ;; As in a checkout that was updated but not recompiled.
 (ert-deftest msl-test-background-emacs-loads-the-newer-source ()
   (let* ((dir (make-temp-file "msl-lib-" t))
