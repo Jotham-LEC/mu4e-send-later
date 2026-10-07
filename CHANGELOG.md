@@ -6,6 +6,8 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-10-07
+
 ### Fixed
 - **Mail sent by SMTP still couldn't be scheduled on a machine with no sendmail.**
   0.4.1 stopped scheduling itself from looking for `sendmail-program`, but the trial
@@ -243,7 +245,8 @@ First version.
   retried, then kept and reported.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
-[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.0...v0.3.1
