@@ -355,8 +355,9 @@ open:
 - There is no usable scheduler, or the timer was not there after it was
   created.
 - The Emacs executable the timer would run does not exist.
-- A trial run of the background Emacs cannot find your send function or
-  `sendmail-program`. With systemd the trial runs as a user service, in the
+- A trial run of the background Emacs cannot find your send function, or
+  `sendmail-program` when the mail goes through it; sending by SMTP needs no
+  sendmail. With systemd the trial runs as a user service, in the
   scheduler's own environment. With launchd it runs from Emacs, in Emacs's
   environment; the jobs themselves get Emacs's `PATH`, but none of its other
   variables.
