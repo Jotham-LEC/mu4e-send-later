@@ -13,9 +13,13 @@
 ;; on screen while it works; to keep it off the screen, run it under a
 ;; headless Wayland compositor, such as
 ;;
-;;     WLR_BACKENDS=headless sway
+;;     WLR_BACKENDS=headless sway -c config
 ;;
-;; with WAYLAND_DISPLAY set to that compositor's socket.
+;; with WAYLAND_DISPLAY set to that compositor's socket.  sway tiles
+;; windows, which overrides the frame sizes set here, so the config
+;; must float them:
+;;
+;;     for_window [app_id=".*"] floating enable
 ;;
 ;; Nothing is sent and nothing is armed.  The queue is a temporary
 ;; directory, deleted at the end; the scheduler, the background sender,
@@ -67,7 +71,6 @@
               mu4e-send-later--send
               mu4e-send-later--call
               mu4e-send-later--backend-run
-              mu4e-send-later-install-login-job
               mu4e-send-later-mode))
   (advice-add fn :override #'screenshots-refuse))
 (advice-add 'mu4e-send-later--succeeds-p :override #'ignore)
@@ -212,6 +215,9 @@ written in the queue's own format, as `mu4e-send-later' writes it."
             "Let me know if anything needs another look before we sign.\n\n"
             "Best,\nSam\n")
     (message-mode)
+    ;; The key `mu4e-send-later-mode' binds in mu4e's drafts; the mode
+    ;; itself stays off here.
+    (keymap-local-set mu4e-send-later-key #'mu4e-send-later)
     (set-buffer-modified-p nil)
     ;; In the body, so the headers stay in view when the calendar pops up.
     (goto-char (point-min))
@@ -235,7 +241,7 @@ written in the queue's own format, as `mu4e-send-later' writes it."
 
 (let (demo)
   (screenshots-run
-   (cons 1 (lambda () (screenshots-type "M-x mu4e-send-later RET")))
+   (cons 1 (lambda () (screenshots-type mu4e-send-later-key)))
    (cons 1 (lambda () (push (screenshots-export "demo-1") demo)))
    (cons 0.2 (lambda () (screenshots-type "tue SPC 9:00")))
    (cons 1 (lambda () (push (screenshots-export "demo-2") demo)))
