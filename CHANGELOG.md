@@ -6,6 +6,15 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-07
+
+### Fixed
+- **A second "Scheduled" bookmark appeared if you had added one yourself**, as
+  the README before 0.5 told you to: it was taken for another, as it writes the
+  query `maildir:/scheduled` and the mode `maildir:"/scheduled"`. Quoted or not,
+  as a plist or in the older `(QUERY NAME KEY)` form, yours is now kept and no
+  other added.
+
 ## [0.5.0] — 2026-10-07
 
 ### Added
@@ -290,7 +299,8 @@ First version.
   retried, then kept and reported.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
-[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.0...v0.4.1

@@ -2481,6 +2481,24 @@ the file it removes."
               (should (= (length mu4e-bookmarks) 3)))
           (mu4e-send-later-mode -1))))))
 
+;; The README before 0.5 had you add this bookmark yourself, unquoted.
+(ert-deftest msl-test-mode-keeps-a-scheduled-bookmark-you-made ()
+  (msl-test--with-queue
+    (dolist (yours (list (list :name "Scheduled" :query "maildir:/scheduled" :key ?s)
+                         (list "maildir:/scheduled" "Scheduled" ?s)))
+      (let ((mu4e-bookmarks (list yours))
+            (mu4e-send-later--bound-key nil)
+            (mu4e-send-later--bookmark nil)
+            (after-load-functions nil)
+            (mu4e-send-later--watch nil)
+            (mu4e-send-later-mode nil))
+        (cl-letf (((symbol-function 'mu4e-send-later-check) #'ignore))
+          (unwind-protect
+              (progn
+                (mu4e-send-later-mode 1)
+                (should (equal mu4e-bookmarks (list yours))))
+            (mu4e-send-later-mode -1)))))))
+
 ;; Left behind, the watch on the queue would call a function no longer
 ;; defined each time the queue changes.
 (ert-deftest msl-test-unloading-leaves-no-watch-or-timer ()
