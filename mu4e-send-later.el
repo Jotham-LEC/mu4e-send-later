@@ -4,7 +4,7 @@
 
 ;; Author: Jotham Lim Ee Chen <jotham@cothink.ing>
 ;; Assisted-by: Claude:claude-opus-5-5
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: mail
 ;; URL: https://github.com/Jotham-LEC/mu4e-send-later
@@ -1637,9 +1637,18 @@ Run on `after-load-functions' while `mu4e-send-later-mode' is on."
     (when (and mu4e-send-later-bookmark
                (boundp 'mu4e-bookmarks)
                (not mu4e-send-later--bookmark))
-      (let ((query (format "maildir:\"/%s\"" (string-trim mu4e-send-later-maildir "/" "/")))
-            (field (lambda (bookmark key) (and (listp bookmark) (plist-get bookmark key)))))
-        (unless (cl-some (lambda (b) (equal (funcall field b :query) query)) mu4e-bookmarks)
+      (let* ((query (format "maildir:\"/%s\"" (string-trim mu4e-send-later-maildir "/" "/")))
+             ;; A plist, or as before mu 1.4, (QUERY NAME KEY).
+             (field (lambda (bookmark key)
+                      (cond ((not (consp bookmark)) nil)
+                            ((stringp (car bookmark))
+                             (nth (if (eq key :query) 0 2) bookmark))
+                            (t (plist-get bookmark key)))))
+             ;; Quoted or not, as `maildir:/scheduled' in your own.
+             (bare (lambda (q) (and (stringp q) (string-replace "\"" "" (string-trim q))))))
+        (unless (cl-some (lambda (b) (equal (funcall bare (funcall field b :query))
+                                            (funcall bare query)))
+                         mu4e-bookmarks)
           (setq mu4e-send-later--bookmark
                 (append (list :name "Scheduled" :query query)
                         (unless (cl-some (lambda (b) (eql (funcall field b :key) ?s))
