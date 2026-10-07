@@ -6,6 +6,51 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-07
+
+### Added
+- **Sensible defaults: `mu4e-send-later-mode` now sets up mu4e for you.** It
+  binds `C-c C-j` (Gnus's key for sending later): in a draft it schedules the
+  message, and in mu4e's message list and view it opens the queue. It also adds
+  a "Scheduled" bookmark on `s`, unless another bookmark already has that key.
+  Turn these off with `mu4e-send-later-key` and `mu4e-send-later-bookmark`.
+
+### Removed
+- **The login job** (`mu4e-send-later-install-login-job`,
+  `-uninstall-login-job`). Overdue mail is sent when the mode starts instead.
+  The wiki's Upgrading page says how to remove a login job you installed.
+- **Filing the Sent copy into an mbox after the message is sent.** Only mu4e's
+  copy now waits until the message is sent. An Fcc to anywhere else is filed
+  when you schedule, as message.el files it. A message queued by 0.4 with an
+  mbox Fcc is still sent, and its copy is kept in `unfiled/`, so the mbox is not
+  overwritten.
+
+### Fixed
+- **With the `emacs` backend, a wake-up that failed to start a sender was lost
+  without a word**, and nothing re-armed it. That happened on any system
+  without `sh`, such as native Windows. The error is now shown, and where
+  there is no `sh` the sender is started directly.
+- **`mu4e-send-later-edit` reopened a message whose send had been
+  interrupted**, so scheduling it again could send it twice. It now refuses, as
+  send-now and reschedule already did.
+- **The queue list kept a rescheduled message where it was first due.** It is
+  now sorted by when each message is due.
+- **A send that hung for over 15 minutes made each later wake-up wait a minute,
+  then fail with an urgent "sender broken".** Its lock is still never broken,
+  since that could send a message twice. The wake-up now leaves the queue to it
+  at once, with an urgent notification saying which process to end if it is
+  stuck. Interactive commands say the same.
+- **A sender whose lock was wrongly broken carried on sending.** Another
+  sender, racing to break a stale lock, could move aside one just taken, and a
+  third could then take the lock: two would send at once. A sender now checks
+  the lock is still its own before each message, and stops if not.
+- **Quitting (`C-g`) just as the lock was taken left it behind**, blocking the
+  queue for 15 minutes. Taking it can no longer be interrupted halfway.
+
+### Changed
+- The README is shorter and leads with the Doom Emacs setup. The details have
+  moved to the wiki.
+
 ## [0.4.2] — 2026-10-07
 
 ### Fixed
@@ -245,7 +290,8 @@ First version.
   retried, then kept and reported.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
-[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.1...v0.4.0
