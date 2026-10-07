@@ -2020,7 +2020,7 @@ TIME is as for `mu4e-send-later'."
 (define-derived-mode mu4e-send-later-list-mode tabulated-list-mode "Send-Later"
   "List of scheduled messages.
 \\{mu4e-send-later-list-mode-map}"
-  (setq tabulated-list-format [("Due" 17 mu4e-send-later--due<) ("State" 9 t) ("To" 28 t)
+  (setq tabulated-list-format [("Due" 20 mu4e-send-later--due<) ("State" 9 t) ("To" 28 t)
                                ("Subject" 40 t) ("Last error" 0 nil)]
         tabulated-list-sort-key nil)
   (add-hook 'tabulated-list-revert-hook #'mu4e-send-later--list-refresh nil t)

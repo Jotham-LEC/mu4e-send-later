@@ -1571,6 +1571,14 @@ That is, after the queue is listed and before ID is read."
           (should (search-forward "pending" nil t)))
       (kill-buffer "*mu4e-send-later*"))))
 
+(ert-deftest msl-test-list-has-room-for-the-whole-due-time ()
+  ;; A graphical frame cuts a cell short with an ellipsis; batch Emacs doesn't,
+  ;; so the width is checked rather than what is drawn.
+  (with-temp-buffer
+    (mu4e-send-later-list-mode)
+    (should (>= (nth 1 (aref tabulated-list-format 0))
+                (string-width (format-time-string "%a %F %H:%M"))))))
+
 (ert-deftest msl-test-list-sorts-by-when-due ()
   (msl-test--with-queue
     ;; The weekdays of four days in a row are never in alphabetical order.

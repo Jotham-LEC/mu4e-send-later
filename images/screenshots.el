@@ -157,17 +157,6 @@ step left waiting."
                               (kill-emacs 2)))
                      (screenshots--next))))))
 
-;; The list gives its Due column 17 characters, and the dates in it take
-;; 20, so the time would be cut short; show it whole.  Once the package
-;; makes the column wide enough, this does nothing.
-(add-hook 'mu4e-send-later-list-mode-hook
-          (lambda ()
-            (let ((due (aref tabulated-list-format 0)))
-              (when (< (nth 1 due) 20)
-                (setq tabulated-list-format (copy-sequence tabulated-list-format))
-                (aset tabulated-list-format 0 (list (car due) 20 (nth 2 due)))
-                (tabulated-list-init-header)))))
-
 ;;;; The queue
 
 (defun screenshots-at (days hour minute)

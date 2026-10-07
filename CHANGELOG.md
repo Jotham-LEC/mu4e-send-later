@@ -11,6 +11,8 @@ All notable changes to mu4e-send-later are documented here. The format is based 
   0.4.1 stopped scheduling itself from looking for `sendmail-program`, but the trial
   run of the background Emacs, which scheduling waits on, still refused one it
   couldn't run. It no longer looks for it either when the mail goes by SMTP.
+- **The queue list cut the due time short**, as in "Thu 2026-10-08 0…": its Due
+  column was 17 characters wide, and the time it shows takes 20.
 
 ## [0.4.1] — 2026-10-07
 
