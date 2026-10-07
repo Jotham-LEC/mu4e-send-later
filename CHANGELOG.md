@@ -6,6 +6,8 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-07
+
 ### Fixed
 - **A `print-length` or `print-level` of your own refused valid settings.** The
   check that a setting can be stored for the background sender printed it with
@@ -225,6 +227,7 @@ First version.
   retried, then kept and reported.
 - org-msg drafts can be scheduled as well as `message-mode` ones.
 
-[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Jotham-LEC/mu4e-send-later/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Jotham-LEC/mu4e-send-later/releases/tag/v0.3.0
