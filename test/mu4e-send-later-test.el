@@ -1183,7 +1183,8 @@ Return its ID."
 (ert-deftest msl-test-sent-copy-for-an-mbox-from-0.4-is-kept ()
   (msl-test--with-queue
     (let* ((root (make-temp-file "msl-mail-" t))
-           (mbox (expand-file-name "sent" root)))
+           ;; Not "sent", which on macOS is the maildir "Sent" below.
+           (mbox (expand-file-name "sent.mbox" root)))
       (unwind-protect
           (let ((id (msl-test--schedule-with-fcc (expand-file-name "Sent/cur/1.2.host:2,S" root)
                                                  "Old" 'mu4e--fcc-handler)))
