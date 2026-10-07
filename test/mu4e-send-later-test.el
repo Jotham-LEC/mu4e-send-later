@@ -1118,42 +1118,54 @@ Return its ID."
 ;; been scheduled, and stayed when it was cancelled.
 (ert-deftest msl-test-sent-copy-is-filed-once-sent ()
   (msl-test--with-queue
-    ;; message.el's default way of filing, in an mbox.
-    (let ((mbox (make-temp-file "msl-sent-")))
+    (let* ((root (make-temp-file "msl-mail-" t))
+           (cancelled-copy (expand-file-name "Sent/cur/1.1.host:2,S" root))
+           (sent-copy (expand-file-name "Sent/cur/1.2.host:2,S" root)))
       (unwind-protect
-          (let ((cancelled (msl-test--schedule-with-fcc mbox "Cancelled"))
-                (sent (msl-test--schedule-with-fcc mbox "Sent"))
-                (filed (lambda ()
-                         (with-temp-buffer
-                           (insert-file-contents mbox)
-                           (buffer-string)))))
-            (should (equal (funcall filed) ""))
+          (let ((cancelled (msl-test--schedule-with-fcc cancelled-copy "Cancelled"
+                                                        'mu4e--fcc-handler))
+                (sent (msl-test--schedule-with-fcc sent-copy "Sent" 'mu4e--fcc-handler)))
+            (should-not (file-exists-p cancelled-copy))
+            (should-not (file-exists-p sent-copy))
             (mu4e-send-later--unschedule cancelled)
             (msl-test--make-due sent)
             (should (zerop (mu4e-send-later--flush)))
             (should-not (mu4e-send-later--ids))
-            (let ((copy (funcall filed)))
+            (should-not (file-exists-p cancelled-copy))
+            (let ((copy (with-temp-buffer
+                          (insert-file-contents sent-copy)
+                          (buffer-string))))
               (should (string-match-p "^Subject: Sent$" copy))
-              (should-not (string-match-p "Cancelled" copy))
               (should-not (string-match-p "^Fcc:" copy))
               (should (string-match-p "^Body with" copy))
               ;; Dated as the message that went out.
               (should (equal (msl-test--date copy)
                              (msl-test--date (plist-get (car msl-test--sent) :text))))))
+        (delete-directory root t)))))
+
+;; Only mu4e's copies wait; any other is filed as message.el files it.
+(ert-deftest msl-test-sent-copy-to-an-mbox-is-filed-when-scheduled ()
+  (msl-test--with-queue
+    (let ((mbox (make-temp-file "msl-sent-")))
+      (unwind-protect
+          (let ((id (msl-test--schedule-with-fcc mbox "To an mbox")))
+            (should (with-temp-buffer
+                      (insert-file-contents mbox)
+                      (re-search-forward "^Subject: To an mbox$" nil t)))
+            (should-not (plist-get (mu4e-send-later--meta id) :fcc)))
         (delete-file mbox)))))
 
 ;; The message is sent, so it mustn't be sent again; nor may its copy
 ;; be lost.
 (ert-deftest msl-test-sent-copy-that-cant-be-filed-is-kept ()
   (msl-test--with-queue
-    (let* ((dir (make-temp-file "msl-sent-" t))
-           (mbox (expand-file-name "sent" dir)))
+    (let* ((root (make-temp-file "msl-mail-" t))
+           (copy (expand-file-name "Sent/cur/1.2.host:2,S" root)))
       (unwind-protect
-          (let ((id (progn (write-region "" nil mbox)
-                           (msl-test--schedule-with-fcc mbox "Unfiled"))))
-            ;; Gone by the time it is sent, and nothing can take its place.
-            (delete-file mbox)
-            (make-directory mbox)
+          (let ((id (msl-test--schedule-with-fcc copy "Unfiled" 'mu4e--fcc-handler)))
+            ;; Nothing can make the maildir.
+            (delete-directory (expand-file-name "Sent" root) t)
+            (write-region "" nil (expand-file-name "Sent" root))
             (msl-test--make-due id)
             (should (zerop (mu4e-send-later--flush)))
             (should (= (length msl-test--sent) 1))
@@ -1164,7 +1176,31 @@ Return its ID."
                                     (cadr (car msl-test--notified))))
             (should (zerop (mu4e-send-later--flush)))
             (should (= (length msl-test--sent) 1)))
-        (delete-directory dir t)))))
+        (delete-directory root t)))))
+
+;; 0.4 kept copies for an mbox too.  Filed as a maildir, one would
+;; replace the whole mbox.
+(ert-deftest msl-test-sent-copy-for-an-mbox-from-0.4-is-kept ()
+  (msl-test--with-queue
+    (let* ((root (make-temp-file "msl-mail-" t))
+           (mbox (expand-file-name "sent" root)))
+      (unwind-protect
+          (let ((id (msl-test--schedule-with-fcc (expand-file-name "Sent/cur/1.2.host:2,S" root)
+                                                 "Old" 'mu4e--fcc-handler)))
+            (write-region "From someone\nearlier mail\n" nil mbox)
+            (let ((meta (mu4e-send-later--meta id)))
+              (mu4e-send-later--set-meta id (thread-first meta
+                                                          (plist-put :fcc (list mbox))
+                                                          (plist-put :fcc-handler 'message-output))))
+            (msl-test--make-due id)
+            (should (zerop (mu4e-send-later--flush)))
+            (should (= (length msl-test--sent) 1))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents mbox)
+                             (buffer-string))
+                           "From someone\nearlier mail\n"))
+            (should (file-exists-p (mu4e-send-later--dir "unfiled" id "fcc-0"))))
+        (delete-directory root t)))))
 
 ;;;; Arming
 
@@ -1225,7 +1261,7 @@ Return its ID."
           (mu4e-send-later--lock-stale-after 0))
       (set-file-times lock (time-add (msl-test--own-start) 1))
       (sleep-for 0.01)
-      (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+      (should-not (eq (mu4e-send-later--lock-status (mu4e-send-later--lock-owner)) 'stale))
       (msl-test--with-lock-deadline
         (should-error (mu4e-send-later--with-lock t) :type 'mu4e-send-later-error))
       (should (file-exists-p (expand-file-name "owner" lock))))))
@@ -1241,10 +1277,10 @@ Return its ID."
   (msl-test--with-queue
     (let ((lock (msl-test--hold-lock (emacs-pid) (system-name))))
       (set-file-times lock (time-subtract (msl-test--own-start) 120))
-      (should (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+      (should (eq (mu4e-send-later--lock-status (mu4e-send-later--lock-owner)) 'stale))
       ;; But not for a small difference, which can be the clocks.
       (set-file-times lock (time-subtract (msl-test--own-start) 30))
-      (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner))))))
+      (should-not (eq (mu4e-send-later--lock-status (mu4e-send-later--lock-owner)) 'stale)))))
 
 (ert-deftest msl-test-lock-of-an-owner-that-cant-be-asked-waits-to-be-old ()
   (msl-test--with-queue
@@ -1255,9 +1291,9 @@ Return its ID."
                     (make-directory (mu4e-send-later--lock-dir) t)
                     (set-file-times (mu4e-send-later--lock-dir) (time-subtract nil 60))
                     (mu4e-send-later--lock-dir))))
-        (should-not (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+        (should-not (eq (mu4e-send-later--lock-status (mu4e-send-later--lock-owner)) 'stale))
         (set-file-times lock (time-subtract nil 3600))
-        (should (mu4e-send-later--lock-stale-p (mu4e-send-later--lock-owner)))
+        (should (eq (mu4e-send-later--lock-status (mu4e-send-later--lock-owner)) 'stale))
         (delete-directory lock t)))))
 
 ;; Two senders find the same stale lock.  One breaks it and takes it,
@@ -1325,8 +1361,10 @@ Return its ID."
           (waited nil))
       (cl-letf (((symbol-function 'sleep-for) (lambda (&rest _) (setq waited t))))
         (let ((err (should-error
-                    (cl-letf (((symbol-function 'float-time)
-                               (lambda (&rest _) (cl-incf start 1))))
+                    (cl-letf* ((float-time* (symbol-function 'float-time))
+                               ((symbol-function 'float-time)
+                                (lambda (&optional time)
+                                  (if time (funcall float-time* time) (cl-incf start 1)))))
                       (mu4e-send-later--with-lock t))
                     :type 'user-error)))
           (should (string-match-p "in progress" (cadr err)))))
@@ -1335,8 +1373,7 @@ Return its ID."
       (should (< (- start (float-time)) 10)))))
 
 ;; A busy owner re-arms as it lets go, so a sender woken meanwhile
-;; can leave the queue to it; one that may be hung, or can't be asked,
-;; is waited for as before.
+;; can leave the queue to it; one that can't be asked is waited for.
 (ert-deftest msl-test-busy-lock-is-left-to-its-owner-only-when-asked ()
   (msl-test--with-queue
     (let ((lock (msl-test--hold-lock (emacs-pid) (system-name))))
@@ -1348,14 +1385,16 @@ Return its ID."
         (should (eq (car (should-error (mu4e-send-later--with-lock t)
                                        :type 'mu4e-send-later-error))
                     'mu4e-send-later-error)))
-      ;; Not used for long: its owner may be hung, and won't re-arm.
+      ;; Not used for long: its owner may be hung.  Breaking its lock
+      ;; could send a message twice, and waiting can't help, so it is
+      ;; left to it, and said to be hung.
       (let ((mu4e-send-later--lock-stale-after 0))
         (set-file-times lock (time-add (msl-test--own-start) 1))
         (sleep-for 0.01)
-        (msl-test--with-lock-deadline
-          (should (eq (car (should-error (mu4e-send-later--call-with-lock #'ignore t)
-                                         :type 'mu4e-send-later-error))
-                      'mu4e-send-later-error))))
+        (should (equal (cddr (should-error (mu4e-send-later--call-with-lock #'ignore t)
+                                           :type 'mu4e-send-later-busy))
+                       '(hung)))
+        (should (file-exists-p (expand-file-name "owner" lock))))
       (delete-directory lock t)
       ;; On another host.
       (msl-test--hold-lock (emacs-pid) "elsewhere")
@@ -1367,6 +1406,63 @@ Return its ID."
       ;; Dead: broken and taken, as before.
       (msl-test--hold-lock msl-test--dead-pid (system-name) 60)
       (should (eq 'ran (mu4e-send-later--call-with-lock (lambda () 'ran) t))))))
+
+;; A sender that has gone quiet for long ended the next one with an
+;; urgent "sender broken", after it had waited a minute for nothing.
+(ert-deftest msl-test-background-sender-reports-a-hung-one ()
+  (msl-test--with-queue
+    (let ((lock (msl-test--hold-lock (emacs-pid) (system-name)))
+          (mu4e-send-later--lock-stale-after 0))
+      (set-file-times lock (time-add (msl-test--own-start) 1))
+      (sleep-for 0.01)
+      (let ((command-line-args-left (list (mu4e-send-later--dir))))
+        (cl-letf (((symbol-function 'kill-emacs)
+                   (lambda (&optional status) (throw 'exit status)))
+                  ((symbol-function 'sleep-for)
+                   (lambda (&rest _) (ert-fail "Waited for a hung sender"))))
+          (should (eql 0 (catch 'exit (mu4e-send-later-batch-flush))))))
+      (should (equal (car (car msl-test--notified)) "Scheduled mail is waiting"))
+      (should (string-match-p (format "process %d" (emacs-pid)) (cadr (car msl-test--notified))))
+      (should (file-exists-p (expand-file-name "owner" lock))))))
+
+;; A sender that wrongly took ours for stale moved it aside, and
+;; another took the lock meanwhile.  Carrying on, we would send
+;; alongside that one.
+(ert-deftest msl-test-sender-that-loses-the-lock-stops ()
+  (msl-test--with-queue
+    (let ((first (car (msl-test--schedule 3600 "First")))
+          (second (car (msl-test--schedule 7200 "Second"))))
+      (msl-test--make-due first)
+      (msl-test--make-due second)
+      (cl-letf* ((attempt (symbol-function 'mu4e-send-later--attempt))
+                 ((symbol-function 'mu4e-send-later--attempt)
+                  (lambda (id)
+                    (prog1 (funcall attempt id)
+                      (write-region "1 elsewhere taken\n" nil
+                                    (expand-file-name "owner" (mu4e-send-later--lock-dir)))))))
+        (should (equal (cddr (should-error (mu4e-send-later--flush)
+                                           :type 'mu4e-send-later-busy))
+                       '(lost))))
+      (should (= (length msl-test--sent) 1))
+      ;; Theirs stands.
+      (should (equal (mu4e-send-later--lock-owner) "1 elsewhere taken"))
+      (delete-directory (mu4e-send-later--lock-dir) t))))
+
+;; Quitting between taking the lock and writing its owner left a lock
+;; no one would break for a quarter of an hour.
+(ert-deftest msl-test-quit-while-taking-the-lock-leaves-none ()
+  (msl-test--with-queue
+    (cl-letf* ((write (symbol-function 'write-region))
+               ((symbol-function 'write-region)
+                (lambda (start end file &rest args)
+                  (if (equal (file-name-nondirectory file) "owner")
+                      (signal 'quit nil)
+                    (apply write start end file args)))))
+      (should (eq 'quit (condition-case nil
+                            (mu4e-send-later--with-lock (ert-fail "Ran without the lock"))
+                          (quit 'quit)))))
+    (should-not (file-exists-p (mu4e-send-later--lock-dir)))
+    (should-not msl-test--armed)))
 
 ;; A wake-up that fires while the lock is held leaves what it was for
 ;; to the holder, which must re-arm even if what it was doing failed.
@@ -1582,19 +1678,25 @@ That is, after the queue is listed and before ID is read."
 (ert-deftest msl-test-list-sorts-by-when-due ()
   (msl-test--with-queue
     ;; The weekdays of four days in a row are never in alphabetical order.
-    (dolist (day '(3 1 4 2))
+    (dolist (day '(3 1 5 2))
       (msl-test--schedule (* 86400 day) (format "day%d" day)))
+    ;; Its ID still says when it was first due.
+    (let ((id (car (last (mu4e-send-later--ids)))))
+      (should (equal (plist-get (mu4e-send-later--meta id) :subject) "day5"))
+      (mu4e-send-later-reschedule (+ (floor (float-time)) (* 86400 4)) id)
+      (mu4e-send-later--set-meta id (plist-put (mu4e-send-later--meta id) :subject "day4")))
     (mu4e-send-later-list)
     (unwind-protect
         (with-current-buffer "*mu4e-send-later*"
           (let ((subjects (lambda ()
                             (mapcar (lambda (entry) (aref (cadr entry) 3))
                                     tabulated-list-entries))))
+            (should (equal (funcall subjects) '("day1" "day2" "day3" "day4")))
             (goto-char (point-min))
             (tabulated-list-sort 0)
-            (should (equal (funcall subjects) '("day1" "day2" "day3" "day4")))
+            (should (equal (funcall subjects) '("day4" "day3" "day2" "day1")))
             (tabulated-list-sort 0)
-            (should (equal (funcall subjects) '("day4" "day3" "day2" "day1")))))
+            (should (equal (funcall subjects) '("day1" "day2" "day3" "day4")))))
       (kill-buffer "*mu4e-send-later*"))))
 
 ;;;; Backend details
@@ -1607,9 +1709,7 @@ That is, after the queue is listed and before ID is read."
     (should (string-match-p (format "<key>Minute</key><integer>%d</integer>"
                                     (decoded-time-minute d))
                             xml))
-    (should-not (string-match-p "RunAtLoad" xml))
-    (should (string-match-p "RunAtLoad"
-                            (mu4e-send-later--plist-xml "a.b" '("/x/emacs"))))))
+    (should-not (string-match-p "RunAtLoad" xml))))
 
 ;; launchd's calendar is the system's wall clock, which Emacs's own time
 ;; zone, from TZ or `set-time-zone-rule', needn't be.
@@ -1683,50 +1783,13 @@ That is, after the queue is listed and before ID is read."
           (should (equal booted (list (concat (mu4e-send-later--launchd-domain) "/" mine)))))
       (delete-directory agents t))))
 
-(defun msl-test--login-job-warnings (installed-from &optional then)
-  "Warnings about login jobs installed while loaded from INSTALLED-FROM.
-Both a systemd unit and a LaunchAgent are written, to temporary places.
-THEN, if given, is called after they are written."
-  (let* ((config (make-temp-file "msl-config-" t))
-         (agents (make-temp-file "msl-agents-" t))
-         (process-environment (cons (concat "XDG_CONFIG_HOME=" config) process-environment))
-         (library-dir (symbol-function 'mu4e-send-later--library-dir))
-         (warnings nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'mu4e-send-later--launchd-agents-dir)
-                   (lambda () (file-name-as-directory agents)))
-                  ((symbol-function 'display-warning)
-                   (lambda (_type message &rest _) (push message warnings))))
-          (cl-letf (((symbol-function 'mu4e-send-later--library-dir)
-                     (lambda () installed-from)))
-            (let ((file (mu4e-send-later--systemd-login-file))
-                  (label (concat mu4e-send-later--launchd-prefix ".login")))
-              (make-directory (file-name-directory file) t)
-              (write-region (mu4e-send-later--systemd-login-unit-text) nil file)
-              (write-region (mu4e-send-later--plist-xml label (mu4e-send-later--login-command))
-                            nil (mu4e-send-later--launchd-plist-file label))))
-          (should (equal (funcall library-dir) (mu4e-send-later--library-dir)))
-          (when then (funcall then))
-          (mu4e-send-later--check-login-job)
-          warnings)
-      (delete-directory config t)
-      (delete-directory agents t))))
-
-(ert-deftest msl-test-login-job-from-an-old-library-dir-is-reported ()
-  (let ((warnings (msl-test--login-job-warnings "/gone/mu4e-send-later-0.1/")))
-    (should (= (length warnings) 2))
-    (dolist (warning warnings)
-      (should (string-match-p "/gone/mu4e-send-later-0.1/" warning))
-      (should (string-match-p "mu4e-send-later-install-login-job" warning)))))
-
 ;; Pending wake-ups name the library directory; after an upgrade they
 ;; must be re-made, pointing at the new one.
 (ert-deftest msl-test-check-always-rearms ()
   (msl-test--with-queue
     (let ((id (car (msl-test--schedule 3600))))
       (setq msl-test--armed nil)
-      (cl-letf (((symbol-function 'mu4e-send-later--check-login-job) #'ignore))
-        (mu4e-send-later-check))
+      (mu4e-send-later-check)
       (should (equal msl-test--armed (list (plist-get (mu4e-send-later--meta id) :due)))))))
 
 ;; package.el upgrades a package by loading it again from a new
@@ -1768,51 +1831,6 @@ THEN, if given, is called after they are written."
                             (load ,(expand-file-name "mu4e-send-later.el" new) nil t))))))
               (should (equal (buffer-string) (format "armed from %s\n" new)))))
         (delete-directory root t)))))
-
-(ert-deftest msl-test-current-login-job-is-not-reported ()
-  (should-not (msl-test--login-job-warnings (mu4e-send-later--library-dir))))
-
-;; The unit file and the plist escape these; they're read back unescaped.
-(ert-deftest msl-test-login-job-with-odd-characters-is-not-reported ()
-  (let* ((odd (make-temp-file "msl-a&b<c>%d$e\\f\"g-" t))
-         (mu4e-send-later-emacs-program (expand-file-name "emacs" odd))
-         (library (file-name-as-directory (expand-file-name "lisp" odd))))
-    (unwind-protect
-        (progn
-          (make-symbolic-link (expand-file-name invocation-name invocation-directory)
-                              mu4e-send-later-emacs-program)
-          (make-directory library)
-          (cl-letf (((symbol-function 'mu4e-send-later--library-dir) (lambda () library)))
-            (should-not (msl-test--login-job-warnings library))
-            ;; And a moved one still is.
-            (should (= 2 (length (msl-test--login-job-warnings
-                                  (file-name-as-directory (expand-file-name "old" odd))))))
-            ;; As is an Emacs that has gone.
-            (let ((warnings (msl-test--login-job-warnings
-                             library
-                             (lambda () (delete-file mu4e-send-later-emacs-program)))))
-              (should (= 2 (length warnings)))
-              (dolist (warning warnings)
-                (should (string-search (concat mu4e-send-later-emacs-program ", which no longer exists")
-                                       warning))))
-            ;; Also in a unit written before 0.3.1, which gave no path.
-            (make-symbolic-link (expand-file-name invocation-name invocation-directory)
-                                mu4e-send-later-emacs-program)
-            (let ((warnings (msl-test--login-job-warnings
-                             library
-                             (lambda ()
-                               (with-temp-file (mu4e-send-later--systemd-login-file)
-                                 (insert (mu4e-send-later--systemd-login-unit-text))
-                                 (goto-char (point-min))
-                                 (should (re-search-forward
-                                          "^ExecStart=\\(@\"\\(?:[^\"\\]\\|\\\\.\\)*\" \\)"))
-                                 (replace-match "" t t nil 1))
-                               (delete-file mu4e-send-later-emacs-program)))))
-              (should (= 2 (length warnings)))
-              (dolist (warning warnings)
-                (should (string-search (concat mu4e-send-later-emacs-program ", which no longer exists")
-                                       warning))))))
-      (delete-directory odd t))))
 
 (defvar msl-test--launchd nil
   "Jobs the fake launchd has loaded: (LABEL . PRINTS-LEFT).
@@ -1906,7 +1924,7 @@ Not in a launchd job, to begin with."
     (let ((label (mu4e-send-later--launchd-label 1790000000)))
       (mu4e-send-later--backend-arm 'launchd 1790000000)
       (setq msl-test--launchctl nil)
-      ;; Loading it again from inside it, as the login job might.
+      ;; Loading it again from inside it.
       (let ((process-environment (msl-test--in-launchd-job label))
             (xml (mu4e-send-later--plist-xml label '("/x/emacs") 1790000000)))
         (mu4e-send-later--launchd-load label xml)
@@ -1946,13 +1964,13 @@ Not in a launchd job, to begin with."
                                    (lambda (&optional status) (throw 'exit status))))
                           (catch 'exit (mu4e-send-later-batch-flush)))))))
         (dolist (job (list label login))
-          (mu4e-send-later--launchd-load job (mu4e-send-later--plist-xml job '("/x/emacs"))))
+          (mu4e-send-later--launchd-load job (mu4e-send-later--plist-xml job '("/x/emacs") 1790000000)))
         (setq msl-test--launchctl nil)
         (should (eql 0 (funcall flush label)))
         (should (equal msl-test--launchctl
                        (list (list "bootout" (concat (mu4e-send-later--launchd-domain) "/" label)))))
         (should-not (file-exists-p (mu4e-send-later--launchd-plist-file label)))
-        ;; The login job is for every login.
+        ;; One not armed for a time, as 0.4's login job, stays.
         (setq msl-test--launchctl nil)
         (should (eql 0 (funcall flush login)))
         (should-not msl-test--launchctl)
@@ -1988,13 +2006,6 @@ Not in a launchd job, to begin with."
             (should (search-forward (format "<key>Hour</key><integer>%d</integer>\n    <key>Minute</key><integer>%d</integer>"
                                             (decoded-time-hour d) (decoded-time-minute d))
                                     nil t))))))))
-
-(ert-deftest msl-test-systemd-quoting ()
-  (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g")
-                 "\"/a b/c\\\"d%%e$$f\\\\g\""))
-  ;; The program's path isn't expanded, so a $ stays one.
-  (should (equal (mu4e-send-later--systemd-quote "/a b/c\"d%e$f\\g" t)
-                 "\"/a b/c\\\"d%%e$f\\\\g\"")))
 
 (defvar msl-test--odd-name "a ${HOME} $x %h \"q' \\ `b`"
   "A file name that systemd, or a shell, would take for more than a name.")
@@ -2124,48 +2135,6 @@ Not in a launchd job, to begin with."
       (should (search-forward "Subject: Odd paths" nil t)))
     ;; It re-armed from the odd paths, and left nothing behind.
     (should (msl-test--wait 30 (lambda () (string-empty-p (msl-test--systemd-units tag)))))))
-
-;; The login job is a unit file, which systemd reads differently.
-(ert-deftest msl-test-integration-systemd-login-job-odd-paths ()
-  "Run the login job's unit, with $, ${VAR} and % in every path it is given."
-  :tags '(:integration)
-  (skip-unless (equal (getenv "MU4E_SEND_LATER_INTEGRATION") "1"))
-  (skip-unless (and (mu4e-send-later--systemd-available-p) (getenv "XDG_RUNTIME_DIR")))
-  ;; systemd refuses a unit file's program with quotes or a backslash.
-  (let ((msl-test--odd-name "a ${HOME} $x %h b"))
-    (msl-test--with-odd-systemd-paths
-      ;; A runtime unit of its own, rather than your login job.
-      (let* ((unit (format "mu4e-send-later-%s-login.service" tag))
-             (file (expand-file-name (concat "systemd/user/" unit) (getenv "XDG_RUNTIME_DIR"))))
-        (unwind-protect
-            (progn
-              ;; Something for it to re-arm, which needs the Emacs it ran as.
-              (msl-test--schedule-odd 3600 "Login")
-              (mu4e-send-later--backend-disarm 'systemd)
-              ;; So it re-arms with the Emacs it was run as, from argv[0].
-              (let ((mu4e-send-later-emacs-program nil))
-                (mu4e-send-later--write-config 'systemd))
-              (should (string-empty-p (msl-test--systemd-units tag)))
-              (make-directory (file-name-directory file) t)
-              (write-region (mu4e-send-later--systemd-login-unit-text) nil file)
-              (should (zerop (call-process "systemctl" nil nil nil "--user" "daemon-reload")))
-              (should (zerop (call-process "systemctl" nil nil nil "--user" "start" unit)))
-              (should (string-match-p "\\.timer" (msl-test--systemd-units tag)))
-              (should-not (file-exists-p sink)))
-          (ignore-errors (delete-file file))
-          (call-process "systemctl" nil nil nil "--user" "daemon-reload")
-          (call-process "systemctl" nil nil nil "--user" "reset-failed" unit))))))
-
-(ert-deftest msl-test-login-job-refuses-a-program-systemd-would ()
-  (let ((mu4e-send-later-emacs-program "/opt/it's/emacs")
-        (process-environment (cons "XDG_CONFIG_HOME=/nonexistent/msl-test" process-environment)))
-    (cl-letf (((symbol-function 'mu4e-send-later--backend) (lambda () 'systemd))
-              ((symbol-function 'file-executable-p) (lambda (_) t))
-              ((symbol-function 'mu4e-send-later--call)
-               (lambda (&rest _) (ert-fail "Installed it"))))
-      (should (string-match-p
-               "quotes"
-               (cadr (should-error (mu4e-send-later-install-login-job) :type 'user-error)))))))
 
 ;;;; mu4e
 
@@ -2464,6 +2433,53 @@ the file it removes."
         (mu4e-send-later-mode -1)
         (when mu4e-send-later--sync-timer (cancel-timer mu4e-send-later--sync-timer))))))
 
+(defvar mu4e-compose-mode-map)
+(defvar mu4e-headers-mode-map)
+(defvar mu4e-bookmarks)
+
+;; Out of the box, as most people would bind them.
+(ert-deftest msl-test-mode-binds-a-key-and-adds-a-bookmark ()
+  (msl-test--with-queue
+    (let ((mu4e-compose-mode-map (make-sparse-keymap))
+          (mu4e-headers-mode-map (make-sparse-keymap))
+          (mu4e-bookmarks (list (list :name "Unread" :query "flag:unread" :key ?u)
+                                ;; As Doom adds its own.
+                                (list "flag:flagged" "Flagged messages" ?f)))
+          (mu4e-send-later--bound-key nil)
+          (mu4e-send-later--bookmark nil)
+          (after-load-functions nil)
+          (mu4e-send-later--watch nil)
+          (mu4e-send-later-mode nil))
+      (cl-letf (((symbol-function 'mu4e-send-later-check) #'ignore))
+        (unwind-protect
+            (progn
+              (mu4e-send-later-mode 1)
+              (should (memq #'mu4e-send-later--setup-mu4e after-load-functions))
+              (should (eq (keymap-lookup mu4e-compose-mode-map "C-c C-j") #'mu4e-send-later))
+              (should (eq (keymap-lookup mu4e-headers-mode-map "C-c C-j") #'mu4e-send-later-list))
+              (should (equal (car (last mu4e-bookmarks))
+                             '(:name "Scheduled" :query "maildir:\"/scheduled\"" :key ?s)))
+              ;; Not twice, as more files load.
+              (run-hook-with-args 'after-load-functions "/x/mu4e-view.el")
+              (should (= (length mu4e-bookmarks) 3))
+              (mu4e-send-later-mode -1)
+              (should-not (memq #'mu4e-send-later--setup-mu4e after-load-functions))
+              (should-not (keymap-lookup mu4e-compose-mode-map "C-c C-j"))
+              (should-not (keymap-lookup mu4e-headers-mode-map "C-c C-j"))
+              (should (= (length mu4e-bookmarks) 2))
+              ;; Another bookmark has the key; and none is wanted.
+              (push (list :name "Sent" :query "maildir:/sent" :key ?s) mu4e-bookmarks)
+              (let ((mu4e-send-later-key nil))
+                (mu4e-send-later-mode 1))
+              (should-not (keymap-lookup mu4e-compose-mode-map "C-c C-j"))
+              (should (equal (car (last mu4e-bookmarks))
+                             '(:name "Scheduled" :query "maildir:\"/scheduled\"")))
+              (mu4e-send-later-mode -1)
+              (let ((mu4e-send-later-bookmark nil))
+                (mu4e-send-later-mode 1))
+              (should (= (length mu4e-bookmarks) 3)))
+          (mu4e-send-later-mode -1))))))
+
 ;; Left behind, the watch on the queue would call a function no longer
 ;; defined each time the queue changes.
 (ert-deftest msl-test-unloading-leaves-no-watch-or-timer ()
@@ -2675,6 +2691,29 @@ the file it removes."
         (msl-test--edit-in-list "Kept"))
       (should (string-match-p (regexp-quote (mu4e-send-later--dir "cancelled" id))
                               (car said))))))
+
+(ert-deftest msl-test-edit-refuses-an-interrupted-send ()
+  (msl-test--with-queue
+    (let* ((result (msl-test--schedule 3600 "Interrupted"))
+           (id (car result)))
+      (kill-buffer (cdr result))
+      (mu4e-send-later--set-meta id (plist-put (mu4e-send-later--meta id) :state 'sending))
+      (cl-letf (((symbol-function 'mu4e-send-later--id-at-point) (lambda () id)))
+        (should-error (mu4e-send-later-edit) :type 'user-error))
+      (should (equal (mu4e-send-later--ids) (list id))))))
+
+;; The wake-up is a one-shot timer: an error in it went unseen.
+(ert-deftest msl-test-emacs-wake-up-that-fails-says-so ()
+  (let ((warnings nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mu4e-send-later--flush-async)
+                   (lambda () (error "No sh here")))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (push message warnings))))
+          (mu4e-send-later--backend-arm 'emacs 1790000000)
+          (timer-event-handler mu4e-send-later--emacs-timer)
+          (should (equal warnings '("No sh here"))))
+      (mu4e-send-later--backend-disarm 'emacs))))
 
 (ert-deftest msl-test-edit-needs-a-kept-draft ()
   (msl-test--with-queue

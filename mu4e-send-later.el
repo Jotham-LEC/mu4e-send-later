@@ -44,13 +44,20 @@
 ;; the queue marked failed, with desktop notifications and warnings in
 ;; Emacs along the way.
 ;;
+;; Dependencies: mu4e, already able to send mail (with smtpmail or a
+;; sendmail program such as msmtp), and a systemd user manager or
+;; launchd to start the sender; org-msg is optional.  mu4e isn't on any
+;; package archive, so it isn't in Package-Requires.
+;;
 ;; Setup:
 ;;
-;;   (mu4e-send-later-mode 1)   ; sends overdue mail and re-arms at startup
+;;   (mu4e-send-later-mode 1)
 ;;
-;; then `M-x mu4e-send-later' in a draft.  Scheduled mail shows in mu4e
-;; under `mu4e-send-later-maildir'; on a message there, or in `M-x
-;; mu4e-send-later-list', `mu4e-send-later-edit', `-reschedule',
+;; then `C-c C-j' in a draft (`M-x mu4e-send-later').  The mode sends
+;; overdue mail at startup, binds `C-c C-j' in mu4e (in a draft it
+;; schedules, elsewhere it lists the queue) and adds a "Scheduled"
+;; bookmark; see `mu4e-send-later-key' and `mu4e-send-later-bookmark'.
+;; On a scheduled message, `mu4e-send-later-edit', `-reschedule',
 ;; `-send-now' and `-cancel' act on it.
 
 ;;; Code:
@@ -74,11 +81,11 @@
 (declare-function mu4e--server-remove "ext:mu4e-server" (docid-or-path))
 (declare-function mu4e--server-move "ext:mu4e-server"
                   (docid-or-msgid &optional maildir flags no-view))
-(declare-function gnus-output-to-mail "gnus-util" (filename &optional ask))
-(declare-function mail-file-babyl-p "mail-utils" (file))
 (declare-function mu4e-message-at-point "ext:mu4e-message" (&optional noerror))
 (declare-function mu4e--draft "ext:mu4e-draft" (compose-type compose-func &optional parent))
 (declare-function mu4e--delimit-headers "ext:mu4e-draft" (&optional undelimit))
+
+(defvar mu4e-bookmarks)
 
 (defvar mu4e-send-later-mode)
 (defvar send-mail-function)
@@ -90,6 +97,20 @@
   "Schedule mail to be sent later."
   :group 'message
   :prefix "mu4e-send-later-")
+
+(defcustom mu4e-send-later-key "C-c C-j"
+  "Key `mu4e-send-later-mode' binds in mu4e, or nil to bind none.
+In a draft it runs `mu4e-send-later'; in mu4e's message list and
+message view, `mu4e-send-later-list'.  The default is the key
+message.el gives `gnus-delay-article', Gnus's way of sending later.
+Set it before turning the mode on."
+  :type '(choice (const :tag "None" nil) key))
+
+(defcustom mu4e-send-later-bookmark t
+  "Non-nil means `mu4e-send-later-mode' adds a mu4e bookmark for scheduled mail.
+It is called \"Scheduled\", on the key `s' unless another bookmark has
+that key, and lists `mu4e-send-later-maildir'."
+  :type 'boolean)
 
 (defcustom mu4e-send-later-directory
   (expand-file-name "mu4e-send-later/"
@@ -245,7 +266,7 @@ it, so one bad item doesn't hold up the others."
    (expand-file-name "meta.eld" (mu4e-send-later--item-dir id)) meta))
 
 (defun mu4e-send-later--ids ()
-  "IDs of every queued item, soonest first."
+  "IDs of every queued item, in the order they were first due."
   (let ((dir (mu4e-send-later--dir)))
     (when (file-directory-p dir)
       (sort (cl-remove-if-not
@@ -283,11 +304,12 @@ LOCK is where the lock is, if not where it belongs."
 
 (defun mu4e-send-later--lock-status (owner)
   "What to make of the lock, held by OWNER.
-`stale' if a dead sender left it behind, `busy' if a sender on this
-host holds it, is running and has used it lately, nil otherwise.
-An owner on this host is asked directly: it is dead as soon as that
-process is gone, or is a newer one that reused its PID, and never
-while it runs.  Otherwise the lock is stale once it is old."
+`stale' if a dead sender left it behind; if a sender on this host
+holds it and is running, `busy', or `hung' once it hasn't used it
+for `mu4e-send-later--lock-stale-after'; nil otherwise.  An owner on
+this host is asked directly: it is dead as soon as that process is
+gone, or is a newer one that reused its PID, and never while it
+runs.  Otherwise the lock is stale once it is old."
   (let* ((mtime (file-attribute-modification-time
                  (file-attributes (mu4e-send-later--lock-dir))))
          (old (and mtime (> (float-time (time-since mtime))
@@ -303,14 +325,12 @@ while it runs.  Otherwise the lock is stale once it is old."
                            (time-less-p (time-add mtime mu4e-send-later--pid-reuse-margin)
                                         start))))
                 'stale)
-               ;; One that hasn't touched it for this long may be hung.
-               ((not old) 'busy))))
+               ;; One that hasn't touched it for this long may be hung,
+               ;; but breaking its lock could send a message twice.
+               (old 'hung)
+               (t 'busy))))
       ;; An owner on another host, or none written, as by 0.2.
       (_ (and old 'stale)))))
-
-(defun mu4e-send-later--lock-stale-p (owner)
-  "Non-nil if the lock, held by OWNER, was left behind by a dead sender."
-  (eq (mu4e-send-later--lock-status owner) 'stale))
 
 (defun mu4e-send-later--break-lock (owner)
   "Break the lock, held by OWNER, which was found stale.
@@ -332,8 +352,17 @@ only removed if it is still OWNER's; if not, it is put back."
           ;; Someone took the lock meanwhile; theirs stands.
           (ignore-errors (delete-directory aside t)))))))
 
-(defun mu4e-send-later--touch-lock ()
-  "Show the lock is still in use, so it isn't taken for stale."
+(defvar mu4e-send-later--lock-token nil
+  "The owner written in the lock held now, if one is.")
+
+(defun mu4e-send-later--keep-lock ()
+  "Show the lock is still in use, so it isn't taken for stale.
+Signal `mu4e-send-later-busy' if it isn't ours any more: a sender
+that found it stale, wrongly, moved it aside, and another may hold
+it now.  Stopping then is what keeps a message from going twice."
+  (let ((owner (mu4e-send-later--lock-owner)))
+    (unless (equal owner mu4e-send-later--lock-token)
+      (signal 'mu4e-send-later-busy (list owner 'lost))))
   (ignore-errors (set-file-times (mu4e-send-later--lock-dir))))
 
 (defvar mu4e-send-later--armed nil
@@ -342,44 +371,61 @@ only removed if it is still OWNER's; if not, it is put back."
 (defun mu4e-send-later--call-with-lock (fn &optional unless-busy)
   "Call FN holding the queue lock.
 With UNLESS-BUSY, signal `mu4e-send-later-busy' rather than wait if a
-sender on this host holds the lock and is busy: it re-arms the wake-up
-as it lets go, which covers whatever falls due meanwhile.  Whoever
-holds the lock re-arms before letting go, even if FN fails."
+sender on this host holds the lock and is running: it re-arms the
+wake-up as it lets go, which covers whatever falls due meanwhile.
+The signal's data is the owner and its `mu4e-send-later--lock-status'.
+Whoever holds the lock re-arms before letting go, even if FN fails."
   (let* ((lock (mu4e-send-later--lock-dir))
          (token (format "%d %s %06x" (emacs-pid) (system-name) (random #xffffff)))
          ;; A background sender can wait out a long send; you shouldn't.
-         (deadline (+ (float-time) (if noninteractive 60 5))))
+         (deadline (+ (float-time) (if noninteractive 60 5)))
+         (mu4e-send-later--lock-token token)
+         (mu4e-send-later--armed nil)
+         (taken nil)
+         (written nil)
+         (started nil)
+         (done nil)
+         status)
     (mu4e-send-later--make-queue-dir)
-    (while (condition-case nil
-               (progn (make-directory lock) nil)
-             (file-already-exists t))
-      (let* ((owner (mu4e-send-later--lock-owner))
-             (status (mu4e-send-later--lock-status owner)))
-        (pcase status
-          ;; A sender that died mid-flush leaves its lock behind.
-          ('stale (mu4e-send-later--break-lock owner))
-          ('busy
-           (when unless-busy
-             (signal 'mu4e-send-later-busy (list owner))))))
-      (when (> (float-time) deadline)
-        (if noninteractive
-            (signal 'mu4e-send-later-error
-                    (list "The queue is locked by another sender" lock))
-          (user-error "A send is in progress; try again in a moment")))
-      (sleep-for 0.2))
-    (condition-case err
-        (write-region (concat token "\n") nil (expand-file-name "owner" lock) nil 'silent)
-      (error (ignore-errors (delete-directory lock t))
-             (signal (car err) (cdr err))))
-    (let ((mu4e-send-later--armed nil)
-          (done nil))
-      (unwind-protect (prog1 (funcall fn) (setq done t))
+    ;; Taking the lock is inside the cleanup, and quitting can't come
+    ;; between making it and saying so, so a quit leaves none behind.
+    (unwind-protect
+        (progn
+          (while (condition-case nil
+                     (let ((inhibit-quit t))
+                       (make-directory lock)
+                       (setq taken t)
+                       nil)
+                   (file-already-exists t))
+            (let ((owner (mu4e-send-later--lock-owner)))
+              (setq status (mu4e-send-later--lock-status owner))
+              (pcase status
+                ;; A sender that died mid-flush leaves its lock behind.
+                ('stale (mu4e-send-later--break-lock owner))
+                ((or 'busy 'hung)
+                 (when unless-busy
+                   (signal 'mu4e-send-later-busy (list owner status))))))
+            (when (> (float-time) deadline)
+              (cond (noninteractive
+                     (signal 'mu4e-send-later-error
+                             (list "The queue is locked by another sender" lock)))
+                    ((eq status 'hung)
+                     (user-error "A send has been going for over %d minutes (process %s); if it is stuck, end it"
+                                 (/ mu4e-send-later--lock-stale-after 60)
+                                 (car (split-string (or (mu4e-send-later--lock-owner) "?")))))
+                    (t (user-error "A send is in progress; try again in a moment"))))
+            (sleep-for 0.2))
+          (write-region (concat token "\n") nil (expand-file-name "owner" lock) nil 'silent)
+          (setq written t
+                started t)
+          (prog1 (funcall fn) (setq done t)))
+      (when taken
         ;; A wake-up that fired while we held the lock found it busy
         ;; and left the queue to us, so what it was for needs one again.
-        (unless (or done mu4e-send-later--armed)
+        (unless (or done (not started) mu4e-send-later--armed)
           (mu4e-send-later--rearm-after-failure))
         ;; If ours was broken as stale, the lock there now is someone else's.
-        (when (equal (mu4e-send-later--lock-owner) token)
+        (when (equal (mu4e-send-later--lock-owner) (and written token))
           (ignore-errors (delete-directory lock t)))))))
 
 (defmacro mu4e-send-later--with-lock (&rest body)
@@ -518,8 +564,10 @@ Also logs it, so it isn't lost where no notification daemon runs."
   "Cancel every wake-up BACKEND has pending.")
 (cl-defgeneric mu4e-send-later--backend-armed-p (backend time)
   "Non-nil if BACKEND will run the queue at TIME.")
-(cl-defgeneric mu4e-send-later--backend-run (backend command)
-  "Run COMMAND synchronously the way BACKEND would; return its output.")
+(cl-defgeneric mu4e-send-later--backend-run (_backend command)
+  "Run COMMAND synchronously the way BACKEND would; return its output.
+Unless BACKEND says otherwise, directly."
+  (apply #'mu4e-send-later--call command))
 
 (defun mu4e-send-later--queue-tag ()
   "Short hash of the queue directory, naming the wake-ups that serve it.
@@ -603,8 +651,8 @@ such as the one the integration test uses."
   "The launchd domain of the logged-in user."
   (format "gui/%d" (user-uid)))
 
-(defun mu4e-send-later--plist-xml (label command &optional time)
-  "LaunchAgent plist LABEL running COMMAND, at TIME if given, else at login."
+(defun mu4e-send-later--plist-xml (label command time)
+  "LaunchAgent plist LABEL running COMMAND at TIME."
   (let ((esc (lambda (s) (replace-regexp-in-string
                           "[&<>]" (lambda (c) (pcase c ("&" "&amp;") ("<" "&lt;") (_ "&gt;")))
                           s t t))))
@@ -616,20 +664,18 @@ such as the one the integration test uses."
      "  <key>ProgramArguments</key>\n  <array>\n"
      (mapconcat (lambda (arg) (concat "    <string>" (funcall esc arg) "</string>\n")) command "")
      "  </array>\n"
-     (if time
-         ;; launchd has minute resolution and no year, so round up to the
-         ;; next whole minute; the job disarms itself after running.  Its
-         ;; calendar is the system's wall clock, whatever Emacs's TZ.
-         (let ((d (decode-time (seconds-to-time (* 60 (ceiling time 60))) 'wall)))
-           (format (concat "  <key>StartCalendarInterval</key>\n  <dict>\n"
-                           "    <key>Month</key><integer>%d</integer>\n"
-                           "    <key>Day</key><integer>%d</integer>\n"
-                           "    <key>Hour</key><integer>%d</integer>\n"
-                           "    <key>Minute</key><integer>%d</integer>\n"
-                           "  </dict>\n")
-                   (decoded-time-month d) (decoded-time-day d)
-                   (decoded-time-hour d) (decoded-time-minute d)))
-       "  <key>RunAtLoad</key><true/>\n")
+     ;; launchd has minute resolution and no year, so round up to the
+     ;; next whole minute; the job disarms itself after running.  Its
+     ;; calendar is the system's wall clock, whatever Emacs's TZ.
+     (let ((d (decode-time (seconds-to-time (* 60 (ceiling time 60))) 'wall)))
+       (format (concat "  <key>StartCalendarInterval</key>\n  <dict>\n"
+                       "    <key>Month</key><integer>%d</integer>\n"
+                       "    <key>Day</key><integer>%d</integer>\n"
+                       "    <key>Hour</key><integer>%d</integer>\n"
+                       "    <key>Minute</key><integer>%d</integer>\n"
+                       "  </dict>\n")
+               (decoded-time-month d) (decoded-time-day d)
+               (decoded-time-hour d) (decoded-time-minute d)))
      "  <key>EnvironmentVariables</key>\n  <dict>\n"
      ;; launchd gives jobs a PATH of only the system's directories, too
      ;; few for a sendmail's own helpers (msmtp's passwordeval, say).
@@ -730,14 +776,11 @@ unloads us, so this comes last."
         (mu4e-send-later--call "launchctl" "bootout"
                                (concat (mu4e-send-later--launchd-domain) "/" label))))))
 
-(cl-defmethod mu4e-send-later--backend-run ((_ (eql 'launchd)) command)
-  "Run COMMAND directly and return its output."
-  (apply #'mu4e-send-later--call command))
-
 (cl-defmethod mu4e-send-later--backend-arm ((_ (eql 'emacs)) time)
   "Wake up to run the queue at TIME, with a Emacs timer."
   (setq mu4e-send-later--emacs-timer
-        (run-at-time (seconds-to-time time) nil #'mu4e-send-later--flush-async)
+        (run-at-time (seconds-to-time time) nil
+                     #'mu4e-send-later--report-errors #'mu4e-send-later--flush-async)
         mu4e-send-later--emacs-timer-time time))
 
 (cl-defmethod mu4e-send-later--backend-disarm ((_ (eql 'emacs)))
@@ -752,10 +795,6 @@ unloads us, so this comes last."
   (and (timerp mu4e-send-later--emacs-timer)
        (memq mu4e-send-later--emacs-timer timer-list)
        (eql time mu4e-send-later--emacs-timer-time)))
-
-(cl-defmethod mu4e-send-later--backend-run ((_ (eql 'emacs)) command)
-  "Run COMMAND directly and return its output."
-  (apply #'mu4e-send-later--call command))
 
 ;;;; Arming
 
@@ -831,19 +870,11 @@ A plist of :text, :mode and :file, the file it was saved as.")
 (defun mu4e-send-later--fcc-later-p (handler files)
   "Non-nil if the Fcc copies to FILES can be filed with HANDLER once sent.
 FILES are as the Fcc headers give them.  The background sender files
-copies the way mu4e does, in a maildir, and the way message.el does by
-default, appending to an mbox, but only to one that exists, as making
-one asks first.  Not a pipe, nor with any other handler."
-  (require 'mail-utils)
+copies the way mu4e does, in a maildir; not to a pipe, nor with any
+other handler, whose copies are filed when the message is scheduled."
   (and files
-       (not (cl-some (lambda (file) (string-match-p "\\`[ \t]*|" file)) files))
-       (pcase handler
-         ('mu4e--fcc-handler t)
-         ('message-output
-          (cl-every (lambda (file)
-                      (setq file (expand-file-name file))
-                      (and (file-regular-p file) (not (mail-file-babyl-p file))))
-                    files)))))
+       (eq handler 'mu4e--fcc-handler)
+       (not (cl-some (lambda (file) (string-match-p "\\`[ \t]*|" file)) files))))
 
 (defun mu4e-send-later--capture-fcc (draft)
   "The copies the Fcc headers of DRAFT, being sent, would file, or nil.
@@ -1209,37 +1240,33 @@ no In-Reply-To, the last one it references is marked passed."
 (defun mu4e-send-later--file (id meta time)
   "File the copies of sent item ID, described by META, dated TIME.
 Signal `mu4e-send-later-fcc-error' if one can't be."
-  (let ((handler (plist-get meta :fcc-handler))
-        (i -1)
+  (let ((i -1)
         (flags nil))
     (condition-case err
         (dolist (file (plist-get meta :fcc))
+          ;; Queued by 0.4 or before, to an mbox: kept, not overwritten.
+          (unless (eq (plist-get meta :fcc-handler) 'mu4e--fcc-handler)
+            (error "Only mu4e's Sent maildir is filed in now"))
           (with-temp-buffer
             (let ((coding-system-for-read 'utf-8-unix))
               (insert-file-contents (expand-file-name (format "fcc-%d" (cl-incf i))
                                                       (mu4e-send-later--item-dir id))))
             ;; Dated as the message that went out.
             (mu4e-send-later--restamp-date "" time)
-            (if (eq handler 'mu4e--fcc-handler)
-                (progn
-                  (mu4e-send-later--file-in-maildir file)
-                  (setq flags (mu4e-send-later--parent-flags)))
-              ;; As `message-output' would, but appending to the mbox
-              ;; without asking, as it exists.
-              (gnus-output-to-mail file nil))))
+            (mu4e-send-later--file-in-maildir file)
+            (setq flags (mu4e-send-later--parent-flags))))
       (error (signal 'mu4e-send-later-fcc-error (list (error-message-string err)))))
     ;; The Emacs running mu4e tells mu about them, and marks what the
     ;; message replied to: mu4e may not even be here.  Without this, mu
     ;; only finds them when it next indexes, and nothing is marked.
-    (when (eq handler 'mu4e--fcc-handler)
-      (condition-case err
-          (progn
-            (with-file-modes #o700
-              (make-directory (mu4e-send-later--dir "filed") t))
-            (mu4e-send-later--write-data (mu4e-send-later--dir "filed" (concat id ".eld"))
-                                         (list :files (plist-get meta :fcc) :flags flags)))
-        (error (mu4e-send-later--log "couldn't tell mu4e %s was filed: %s"
-                                     id (error-message-string err)))))))
+    (condition-case err
+        (when (plist-get meta :fcc)
+          (with-file-modes #o700
+            (make-directory (mu4e-send-later--dir "filed") t))
+          (mu4e-send-later--write-data (mu4e-send-later--dir "filed" (concat id ".eld"))
+                                       (list :files (plist-get meta :fcc) :flags flags)))
+      (error (mu4e-send-later--log "couldn't tell mu4e %s was filed: %s"
+                                   id (error-message-string err))))))
 
 (defun mu4e-send-later--keep-unfiled (id meta err)
   "Keep the copies of sent item ID, described by META, ERR kept from filing.
@@ -1352,7 +1379,7 @@ UNLESS-BUSY is as for `mu4e-send-later--call-with-lock'."
     (mu4e-send-later--call-with-lock
      (lambda ()
        (dolist (id (mu4e-send-later--ids))
-         (mu4e-send-later--touch-lock)
+         (mu4e-send-later--keep-lock)
          (let* ((meta (mu4e-send-later--checked-meta id t))
                 (wake (mu4e-send-later--wake-time meta)))
            (cond ((not meta)
@@ -1391,8 +1418,19 @@ UNLESS-BUSY is as for `mu4e-send-later--call-with-lock'."
                   ;; Started while another send runs, by send-now say:
                   ;; that one sends what is due, or re-arms for it.
                   (mu4e-send-later-busy
-                   (mu4e-send-later--log "%s is sending; leaving the queue to it"
-                                         (cadr err))
+                   (pcase (nth 2 err)
+                     ('hung
+                      (mu4e-send-later--notify
+                       "Scheduled mail is waiting"
+                       (format "A send has been going for over %d minutes (process %s), and mail due is waiting for it. If it is stuck, end it."
+                               (/ mu4e-send-later--lock-stale-after 60)
+                               (car (split-string (or (cadr err) "?"))))
+                       t))
+                     ('lost
+                      (mu4e-send-later--log "the queue lock was taken from us; leaving the queue to %s"
+                                            (cadr err)))
+                     (_ (mu4e-send-later--log "%s is sending; leaving the queue to it"
+                                              (cadr err))))
                    0)
                   (error
                    (mu4e-send-later--notify
@@ -1455,9 +1493,10 @@ Call ON-EXIT with the exit status when it finishes."
          ;; outlive this Emacs, which hangs up on its children as it
          ;; exits.  With no stdin, a send function that prompts fails
          ;; instead of waiting forever.
-         (command (append (list "sh" "-c"
-                                "out=$1; shift; exec nohup \"$@\" </dev/null >\"$out\" 2>&1"
-                                "sh" out)
+         (command (append (and (executable-find "sh")
+                               (list "sh" "-c"
+                                     "out=$1; shift; exec nohup \"$@\" </dev/null >\"$out\" 2>&1"
+                                     "sh" out))
                           (mu4e-send-later--command 'mu4e-send-later-batch-flush))))
     (make-process
      :name "mu4e-send-later" :buffer buffer :command command :noquery t
@@ -1469,7 +1508,8 @@ Call ON-EXIT with the exit status when it finishes."
                (output (concat (with-temp-buffer
                                  (ignore-errors (insert-file-contents out))
                                  (buffer-string))
-                               ;; Only from sh, if it couldn't start the rest.
+                               ;; From sh, if it couldn't start the rest, or
+                               ;; all of it where there is no sh.
                                (with-current-buffer buffer (buffer-string)))))
            (ignore-errors (delete-file out))
            (kill-buffer buffer)
@@ -1526,8 +1566,7 @@ Call ON-EXIT with the exit status when it finishes."
            (progn
              (message "mu4e-send-later: sending %d overdue message(s)" (length overdue))
              (mu4e-send-later--flush-async))
-         (mu4e-send-later--with-lock (mu4e-send-later--arm)))))
-    (mu4e-send-later--check-login-job)))
+         (mu4e-send-later--with-lock (mu4e-send-later--arm)))))))
 
 ;;;###autoload
 (define-minor-mode mu4e-send-later-mode
@@ -1541,150 +1580,21 @@ failed messages are reported."
   (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
     (remove-hook hook #'mu4e-send-later--mu4e-sync-safely))
   (remove-hook 'after-init-hook #'mu4e-send-later-check)
+  (remove-hook 'after-load-functions #'mu4e-send-later--setup-mu4e)
   (when mu4e-send-later--sync-timer
     (cancel-timer mu4e-send-later--sync-timer)
     (setq mu4e-send-later--sync-timer nil))
+  (mu4e-send-later--teardown-mu4e)
   (when mu4e-send-later-mode
     (dolist (hook '(mu4e-main-rendered-hook mu4e-index-updated-hook))
       (add-hook hook #'mu4e-send-later--mu4e-sync-safely))
     (mu4e-send-later--watch)
+    ;; Now, as far as mu4e and org-msg are loaded, and as they load.
+    (mu4e-send-later--setup-mu4e)
+    (add-hook 'after-load-functions #'mu4e-send-later--setup-mu4e)
     (if after-init-time
         (mu4e-send-later-check)
       (add-hook 'after-init-hook #'mu4e-send-later-check))))
-
-;;;; Login job
-
-(defconst mu4e-send-later--systemd-login-unit "mu4e-send-later-login.service"
-  "User unit that sends overdue mail at login.")
-
-(defun mu4e-send-later--systemd-login-file ()
-  "Path of the login unit file."
-  (expand-file-name (concat "systemd/user/" mu4e-send-later--systemd-login-unit)
-                    (or (getenv "XDG_CONFIG_HOME") "~/.config")))
-
-(defun mu4e-send-later--systemd-quote (arg &optional path)
-  "Quote ARG for a systemd ExecStart line.
-With PATH, as the path of the program, where systemd takes `$' as it
-is, and \"$$\" would be two."
-  (concat "\"" (replace-regexp-in-string
-                (if path "[\"\\%]" "[\"\\%$]")
-                (lambda (c) (if (equal c "%") "%%" (if (equal c "$") "$$" (concat "\\" c))))
-                arg t t)
-          "\""))
-
-(defun mu4e-send-later--login-command ()
-  "Command line of the login job."
-  (mu4e-send-later--command 'mu4e-send-later-batch-flush))
-
-(defun mu4e-send-later--systemd-login-unit-text ()
-  "Contents of the login unit file."
-  (concat "[Unit]\n"
-          "Description=Send mail that fell due while logged out (mu4e-send-later)\n\n"
-          "[Service]\nType=oneshot\n"
-          ;; The program's path, then all of the command: systemd
-          ;; expands `$' in the program as run, argv[0], but not in its
-          ;; path, so they are given apart, each escaped as it needs.
-          "ExecStart=@" (let ((command (mu4e-send-later--login-command)))
-                          (concat (mu4e-send-later--systemd-quote (car command) t) " "
-                                  (mapconcat #'mu4e-send-later--systemd-quote command " ")))
-          "\n\n[Install]\nWantedBy=default.target\n"))
-
-;;;###autoload
-(defun mu4e-send-later-install-login-job ()
-  "Send overdue mail at login too, not just at the next Emacs start.
-Re-run this if the Emacs executable moves, e.g. after an upgrade."
-  (interactive)
-  (pcase (mu4e-send-later--backend)
-    ('systemd
-     (let ((file (mu4e-send-later--systemd-login-file))
-           (emacs (car (mu4e-send-later--login-command))))
-       ;; A timer's program is a shell, so this is only the login job's.
-       (when (string-match-p "[[:cntrl:]\"'\\*?[]" emacs)
-         (user-error "The login job can't run %s: systemd won't run a program whose path has quotes, backslashes, control characters or any of *?[; set `mu4e-send-later-emacs-program' to a path without"
-                     emacs))
-       (make-directory (file-name-directory file) t)
-       (let ((coding-system-for-write 'utf-8-unix))
-         (write-region (mu4e-send-later--systemd-login-unit-text) nil file nil 'silent))
-       (mu4e-send-later--call "systemctl" "--user" "daemon-reload")
-       (mu4e-send-later--call "systemctl" "--user" "enable" mu4e-send-later--systemd-login-unit)
-       (message "Installed %s" file)))
-    ('launchd
-     (let ((label (concat mu4e-send-later--launchd-prefix ".login")))
-       (mu4e-send-later--launchd-load
-        label (mu4e-send-later--plist-xml label (mu4e-send-later--login-command)))
-       (message "Installed %s" (mu4e-send-later--launchd-plist-file label))))
-    (_ (user-error "A login job needs systemd or launchd"))))
-
-;;;###autoload
-(defun mu4e-send-later-uninstall-login-job ()
-  "Remove the job installed by `mu4e-send-later-install-login-job'."
-  (interactive)
-  (let ((unit (mu4e-send-later--systemd-login-file))
-        (label (concat mu4e-send-later--launchd-prefix ".login")))
-    (when (file-exists-p unit)
-      (mu4e-send-later--call "systemctl" "--user" "disable" mu4e-send-later--systemd-login-unit)
-      (delete-file unit)
-      (mu4e-send-later--call "systemctl" "--user" "daemon-reload")
-      (message "Removed %s" unit))
-    (when (file-exists-p (mu4e-send-later--launchd-plist-file label))
-      (ignore-errors
-        (mu4e-send-later--call "launchctl" "bootout"
-                               (concat (mu4e-send-later--launchd-domain) "/" label)))
-      (delete-file (mu4e-send-later--launchd-plist-file label))
-      (message "Removed %s" (mu4e-send-later--launchd-plist-file label)))))
-
-(defun mu4e-send-later--check-login-job ()
-  "Warn if an installed login job would run an Emacs or a library that moved.
-The library moves when the package is upgraded."
-  (dolist (file (list (mu4e-send-later--systemd-login-file)
-                      (mu4e-send-later--launchd-plist-file
-                       (concat mu4e-send-later--launchd-prefix ".login"))))
-    (when (file-exists-p file)
-      (with-temp-buffer
-        (insert-file-contents file)
-        (let* ((plist (string-suffix-p ".plist" file))
-               ;; An argument as written there, and read back from that.
-               (value (if plist
-                          "<string>\\([^<]*\\)</string>"
-                        "\"\\(\\(?:[^\"\\]\\|\\\\.\\)*\\)\""))
-               (read (lambda ()
-                       (if plist
-                           (replace-regexp-in-string
-                            "&\\(?:amp\\|lt\\|gt\\);"
-                            (lambda (s) (pcase s ("&amp;" "&") ("&lt;" "<") (_ ">")))
-                            (match-string 1) t t)
-                         (replace-regexp-in-string
-                          "\\\\.\\|%%\\|\\$\\$"
-                          (lambda (s) (substring s 1))
-                          (match-string 1) t t))))
-               (emacs (when (re-search-forward
-                             (concat (if plist
-                                         "<key>ProgramArguments</key>\\s-*<array>\\s-*"
-                                       ;; The path, then the program as run.
-                                       ;; Not in units from before 0.3.1.
-                                       "ExecStart=\\(?:@\"\\(?:[^\"\\]\\|\\\\.\\)*\" \\)?")
-                                     value)
-                             nil t)
-                        (funcall read)))
-               (library (when (re-search-forward
-                               (concat (if plist "<string>-L</string>\\s-*" "\"-L\" ") value)
-                               nil t)
-                          (funcall read)))
-               (current (ignore-errors (mu4e-send-later--library-dir))))
-          (when (and emacs (not (file-executable-p emacs)))
-            (display-warning
-             'mu4e-send-later
-             (format "The login job in %s runs %s, which no longer exists; run M-x mu4e-send-later-install-login-job again"
-                     file emacs)
-             :error))
-          (when (and library current
-                     (not (equal (file-name-as-directory library)
-                                 (file-name-as-directory current))))
-            (display-warning
-             'mu4e-send-later
-             (format "The login job in %s loads mu4e-send-later from %s, not from %s where it is now; run M-x mu4e-send-later-install-login-job again"
-                     file library current)
-             :error)))))))
 
 ;;;; mu4e
 
@@ -1700,6 +1610,55 @@ The library moves when the package is upgraded."
 
 (defvar mu4e-send-later--mirrored (make-hash-table :test #'equal)
   "Due time each message in `mu4e-send-later-maildir' was written for, by ID.")
+
+(defconst mu4e-send-later--keymaps
+  '((mu4e-compose-mode-map . mu4e-send-later)
+    (org-msg-edit-mode-map . mu4e-send-later)
+    (mu4e-headers-mode-map . mu4e-send-later-list)
+    (mu4e-view-mode-map . mu4e-send-later-list))
+  "Keymaps `mu4e-send-later-key' is bound in, and the command it runs there.")
+
+(defvar mu4e-send-later--bound-key nil
+  "The key `mu4e-send-later-mode' bound, to unbind it when turned off.")
+
+(defvar mu4e-send-later--bookmark nil
+  "The bookmark `mu4e-send-later-mode' added to `mu4e-bookmarks', if any.")
+
+(defun mu4e-send-later--setup-mu4e (&rest _)
+  "Bind `mu4e-send-later-key' and add the bookmark, as far as mu4e has loaded.
+Run on `after-load-functions' while `mu4e-send-later-mode' is on."
+  (when mu4e-send-later-mode
+    (when mu4e-send-later-key
+      (setq mu4e-send-later--bound-key mu4e-send-later-key)
+      (pcase-dolist (`(,map . ,command) mu4e-send-later--keymaps)
+        (when (and (boundp map)
+                   (not (eq (keymap-lookup (symbol-value map) mu4e-send-later-key) command)))
+          (keymap-set (symbol-value map) mu4e-send-later-key command))))
+    (when (and mu4e-send-later-bookmark
+               (boundp 'mu4e-bookmarks)
+               (not mu4e-send-later--bookmark))
+      (let ((query (format "maildir:\"/%s\"" (string-trim mu4e-send-later-maildir "/" "/")))
+            (field (lambda (bookmark key) (and (listp bookmark) (plist-get bookmark key)))))
+        (unless (cl-some (lambda (b) (equal (funcall field b :query) query)) mu4e-bookmarks)
+          (setq mu4e-send-later--bookmark
+                (append (list :name "Scheduled" :query query)
+                        (unless (cl-some (lambda (b) (eql (funcall field b :key) ?s))
+                                         mu4e-bookmarks)
+                          (list :key ?s))))
+          (add-to-list 'mu4e-bookmarks mu4e-send-later--bookmark t))))))
+
+(defun mu4e-send-later--teardown-mu4e ()
+  "Undo `mu4e-send-later--setup-mu4e'."
+  (when mu4e-send-later--bound-key
+    (pcase-dolist (`(,map . ,command) mu4e-send-later--keymaps)
+      (when (and (boundp map)
+                 (eq (keymap-lookup (symbol-value map) mu4e-send-later--bound-key) command))
+        (keymap-unset (symbol-value map) mu4e-send-later--bound-key t)))
+    (setq mu4e-send-later--bound-key nil))
+  (when mu4e-send-later--bookmark
+    (when (boundp 'mu4e-bookmarks)
+      (setq mu4e-bookmarks (delete mu4e-send-later--bookmark mu4e-bookmarks)))
+    (setq mu4e-send-later--bookmark nil)))
 
 (defun mu4e-send-later--mirror-dir ()
   "The cur/ directory of `mu4e-send-later-maildir', or nil without mu4e."
@@ -1957,6 +1916,9 @@ Schedule it again with `mu4e-send-later' once edited."
          (file (expand-file-name "draft" (mu4e-send-later--item-dir id))))
     (unless (file-exists-p file)
       (user-error "This message was scheduled without keeping its draft; cancel it and write it again"))
+    ;; Scheduled again, it would go out a second time.
+    (when (eq (plist-get meta :state) 'sending)
+      (user-error "It is being sent, or its send was interrupted and it may have been sent; check, then cancel it if you still want to edit it"))
     (let ((text (condition-case nil
                     (with-temp-buffer
                       (let ((coding-system-for-read 'utf-8-unix))
@@ -2022,7 +1984,8 @@ TIME is as for `mu4e-send-later'."
 \\{mu4e-send-later-list-mode-map}"
   (setq tabulated-list-format [("Due" 20 mu4e-send-later--due<) ("State" 9 t) ("To" 28 t)
                                ("Subject" 40 t) ("Last error" 0 nil)]
-        tabulated-list-sort-key nil)
+        ;; Not the queue's order, which is by when first scheduled.
+        tabulated-list-sort-key '("Due"))
   (add-hook 'tabulated-list-revert-hook #'mu4e-send-later--list-refresh nil t)
   (tabulated-list-init-header))
 
@@ -2075,7 +2038,7 @@ TIME is as for `mu4e-send-later'."
   (view-file (expand-file-name "message" (mu4e-send-later--item-dir (mu4e-send-later--id-at-point)))))
 
 (defun mu4e-send-later-unload-function ()
-  "Stop watching the queue, for `unload-feature'."
+  "Stop watching the queue and unbind keys, for `unload-feature'."
   (mu4e-send-later-mode -1)
   (mu4e-send-later--backend-disarm 'emacs)
   ;; And carry on unloading as usual.
