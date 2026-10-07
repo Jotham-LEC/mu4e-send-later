@@ -6,6 +6,12 @@ All notable changes to mu4e-send-later are documented here. The format is based 
 
 ## [Unreleased]
 
+### Fixed
+- **Mail sent by SMTP couldn't be scheduled on a machine with no sendmail.**
+  Scheduling looked for `sendmail-program` whatever the mail was sent with, and
+  refused when it wasn't there. It is only looked for now when the mail goes through
+  it, and not for `smtpmail-send-it` or `message-smtpmail-send-it`.
+
 ## [0.4.0] — 2026-10-07
 
 ### Fixed

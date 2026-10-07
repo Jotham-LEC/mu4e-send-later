@@ -884,14 +884,25 @@ mu4e, which marks the message replied to once it has filed, doesn't."
       (equal value (car (read-from-string (mu4e-send-later--print value))))
     (error nil)))
 
-(defun mu4e-send-later--snapshot ()
-  "Alist of `mu4e-send-later-variables' as they are now."
+(defun mu4e-send-later--smtp-p (send-function)
+  "Non-nil if SEND-FUNCTION sends by SMTP, with no need of sendmail.
+SEND-FUNCTION is resolved with `mu4e-send-later--effective-send-function'."
+  (memq (if (eq send-function 'message-use-send-mail-function)
+            send-mail-function
+          send-function)
+        '(smtpmail-send-it message-smtpmail-send-it)))
+
+(defun mu4e-send-later--snapshot (&optional send-function)
+  "Alist of `mu4e-send-later-variables' as they are now.
+`sendmail-program' is made absolute, and refused if it can't be found,
+unless SEND-FUNCTION sends by SMTP, which needs no sendmail."
   (let (vars)
     (dolist (var mu4e-send-later-variables (nreverse vars))
       (when (boundp var)
         (let ((value (symbol-value var)))
           (when (and (eq var 'sendmail-program) (stringp value))
             (setq value (or (executable-find value)
+                            (and (mu4e-send-later--smtp-p send-function) value)
                             (signal 'mu4e-send-later-error
                                     (list "`sendmail-program' not found" value)))))
           (unless (mu4e-send-later--readable-p value)
@@ -952,7 +963,7 @@ Called where `message-send-mail-function' would be.  FCC is a list of
 \(FILE . TEXT), copies to file with HANDLER once it is sent, as from
 `mu4e-send-later--capture-fcc'.  Return the new ID."
   (let* ((backend (mu4e-send-later--backend))
-         (vars (mu4e-send-later--snapshot))
+         (vars (mu4e-send-later--snapshot send-function))
          (id (format "%d-%06x" time (random #xffffff)))
          (tmp (mu4e-send-later--dir (concat ".tmp-" id)))
          (meta (list :format mu4e-send-later--format

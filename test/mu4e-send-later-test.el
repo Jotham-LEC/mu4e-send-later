@@ -505,6 +505,8 @@ Skips the test where org-msg isn't installed, except on CI."
   (msl-test--with-queue
     (let ((mu4e-send-later-variables (msl-test--default-variables))
           (send-mail-function #'smtpmail-send-it)
+          ;; Sending by SMTP needs no sendmail, and many machines have none.
+          (sendmail-program "no-such-sendmail-xyz")
           (buffer (msl-test--draft)))
       (unwind-protect
           (let* ((id (with-current-buffer buffer
@@ -647,7 +649,15 @@ Skips the test where org-msg isn't installed, except on CI."
                (alist-get 'sendmail-program (mu4e-send-later--snapshot)))))
     (let ((mu4e-send-later-variables '(sendmail-program))
           (sendmail-program "no-such-sendmail-xyz"))
-      (should-error (mu4e-send-later--snapshot) :type 'mu4e-send-later-error))))
+      (should-error (mu4e-send-later--snapshot) :type 'mu4e-send-later-error)
+      (should-error (mu4e-send-later--snapshot 'message-send-mail-with-sendmail)
+                    :type 'mu4e-send-later-error)
+      ;; Unless the mail goes by SMTP, which never runs it.
+      (let ((send-mail-function #'smtpmail-send-it))
+        (should (equal (mu4e-send-later--snapshot 'message-use-send-mail-function)
+                       '((sendmail-program . "no-such-sendmail-xyz")))))
+      (should (equal (mu4e-send-later--snapshot 'message-smtpmail-send-it)
+                     '((sendmail-program . "no-such-sendmail-xyz")))))))
 
 ;;;; Sending
 
